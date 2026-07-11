@@ -448,6 +448,7 @@ def load_annotations(ann_path):
             "endLine": max(start, end),
             "color": a.get("color") if a.get("color") in ANN_COLORS else "yellow",
             "text": text,
+            "orphaned": bool(a.get("orphaned")),
         })
     result.sort(key=lambda a: a["startLine"])
     return result
@@ -474,7 +475,13 @@ def save_annotations(ann_path, rel_name, annotations, prune_root=None):
                 d = os.path.dirname(d)
         return
     os.makedirs(os.path.dirname(ann_path), exist_ok=True)
-    data = {"version": 1, "file": rel_name, "annotations": annotations}
+    entries = []
+    for a in annotations:                # keep files clean: the orphaned
+        a = dict(a)                      # flag is only written when set
+        if not a.get("orphaned"):
+            a.pop("orphaned", None)
+        entries.append(a)
+    data = {"version": 1, "file": rel_name, "annotations": entries}
     # write to a sibling temp file, then swap atomically — a crash mid-write
     # can never leave a truncated annotation file behind
     tmp = ann_path + ".tmp~"
@@ -1150,15 +1157,20 @@ class CodeAnnotatorApp:
         if self.show_annotations.get():
             for a in self.annotations:
                 rgb = ANN_COLORS[a["color"]]
+                orphaned = a.get("orphaned")
                 y0 = self.pad + (a["startLine"] - 1) * lh
                 y1 = self.pad + min(a["endLine"], len(self.lines)) * lh
-                band = blend(BG, rgb, alpha * 0.45)
+                band = blend(BG, rgb, alpha * (0.18 if orphaned else 0.45))
                 edge = blend(BG, rgb, min(1.0, alpha * 1.5))
                 tag = ("ann", "ann_" + a["id"])
                 canvas.create_rectangle(0, y0, self.content_width, y1,
                                         fill=band, outline="", tags=tag)
-                canvas.create_rectangle(0, y0, 3, y1, fill=edge, outline="",
-                                        tags=tag)
+                if orphaned:             # dashed edge marks a best-guess spot
+                    canvas.create_line(2, y0 + 1, 2, y1 - 1, fill=edge,
+                                       width=3, dash=(3, 3), tags=tag)
+                else:
+                    canvas.create_rectangle(0, y0, 3, y1, fill=edge,
+                                            outline="", tags=tag)
                 if a["text"]:
                     self._draw_note(a, y0, tag, alpha)
             # highlight bands sit under the code so text stays crisp;
@@ -1211,9 +1223,11 @@ class CodeAnnotatorApp:
         hi_cover = min(a["endLine"], len(self.lines))
         width = max(min_w, avail(hi_cover))
         note_fill = blend(BG, (255, 255, 255), min(1.0, 0.35 + alpha * 0.65))
+        prefix = ("⚠ orphaned — " if a.get("orphaned")
+                  else "\U0001F3F7 ")
         item = self.canvas.create_text(
             nx, y0 + 2, anchor="ne", width=width, justify="right",
-            text="\U0001F3F7 " + a["text"], font=self.note_font,
+            text=prefix + a["text"], font=self.note_font,
             fill=note_fill, tags=tag + ("note",))
         for _ in range(6):
             bottom = self.canvas.bbox(item)[3]
@@ -1639,7 +1653,21 @@ class CodeAnnotatorApp:
         for a in self.annotations:
             rng = self.editor.tag_ranges("eband_" + a["id"])
             if not rng:
-                continue                 # annotated region deleted; keep as-is
+                # the whole annotated region was deleted — collapse the
+                # annotation to the deletion point (tracked by its mark)
+                # and flag it as orphaned instead of keeping stale lines
+                mark = "eann_" + a["id"]
+                if mark not in self.editor.mark_names():
+                    continue
+                ln = int(self.editor.index(mark).split(".")[0])
+                total = int(self.editor.index("end-1c").split(".")[0])
+                ln = max(1, min(ln, total))
+                if (a["startLine"], a["endLine"],
+                        bool(a.get("orphaned"))) != (ln, ln, True):
+                    a["startLine"], a["endLine"] = ln, ln
+                    a["orphaned"] = True
+                    changed = True
+                continue
             start = int(str(rng[0]).split(".")[0])
             end_ln, end_col = (int(v) for v in str(rng[-1]).split("."))
             if end_col == 0:             # band ends at a line start: exclusive
@@ -1653,18 +1681,26 @@ class CodeAnnotatorApp:
             self._persist()
 
     def _e_apply_bands(self):
-        """Show annotation ranges as background tags in the editor."""
+        """Show annotation ranges as background tags in the editor, and drop
+        a mark at each start — marks survive deletion of the surrounding
+        text, so a fully deleted region still has a trackable position."""
+        for mark in self.editor.mark_names():
+            if mark.startswith("eann_"):     # stale marks from earlier files
+                self.editor.mark_unset(mark)
         alpha = self.opacity.get() / 100.0
         total = int(self.editor.index("end-1c").split(".")[0])
         for a in self.annotations:
             tag = "eband_" + a["id"]
+            factor = 0.18 if a.get("orphaned") else 0.45
             self.editor.tag_configure(
                 tag, background=blend(BG, ANN_COLORS[a["color"]],
-                                      alpha * 0.45))
+                                      alpha * factor))
             start = min(a["startLine"], total)
             end = min(a["endLine"], total)
             self.editor.tag_add(tag, "%d.0" % start, "%d.0" % (end + 1))
             self.editor.tag_lower(tag)
+            self.editor.mark_set("eann_" + a["id"], "%d.0" % start)
+            self.editor.mark_gravity("eann_" + a["id"], "left")
         self.editor.tag_raise("sel")     # selection stays visible over bands
 
     def _set_edit_hint(self):
@@ -1835,6 +1871,7 @@ class CodeAnnotatorApp:
         self.canvas.focus_set()          # keyboard focus back to the app
         self._pending = None
         if dialog.result in ("save", "paste"):
+            ann["orphaned"] = False      # user re-confirmed this location
             if is_new:
                 self.annotations.append(ann)
                 self.annotations.sort(key=lambda a: a["startLine"])

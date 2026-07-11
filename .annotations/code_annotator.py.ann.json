@@ -68,126 +68,126 @@
     {
       "id": "3f4d54d3",
       "startLine": 445,
-      "endLine": 451,
+      "endLine": 452,
       "color": "pink",
       "text": "PYTHON: annotations are plain dicts (string-keyed maps), not a class/struct — a typo'd key is only caught at runtime as a KeyError"
     },
     {
       "id": "8ce10054",
-      "startLine": 456,
-      "endLine": 483,
+      "startLine": 457,
+      "endLine": 490,
       "color": "yellow",
       "text": "Persistence: writes into the mirror tree; removing the last annotation prunes empty dirs"
     },
     {
       "id": "b14c4ef6",
-      "startLine": 539,
-      "endLine": 539,
+      "startLine": 546,
+      "endLine": 546,
       "color": "orange",
       "text": "PYTHON gotcha handled right: nm=name freezes the loop value — closures capture variables, not values, so without it every swatch would pick the LAST color"
     },
     {
       "id": "cf5a8145",
-      "startLine": 558,
-      "endLine": 558,
+      "startLine": 565,
+      "endLine": 565,
       "color": "pink",
       "text": "PYTHON hack: builds a tuple to call _save() AND return 'break' in one expression — works, but a named two-line handler would be clearer"
     },
     {
       "id": "544e6840",
-      "startLine": 621,
-      "endLine": 622,
+      "startLine": 628,
+      "endLine": 629,
       "color": "purple",
       "text": "REVIEW: ~1250-line god class, 60+ methods, many interacting mode flags (_edit_mode, _paste_ann, _dragged...) — consider extracting find/editor/annotation-store before the next big feature"
     },
     {
       "id": "6aa10a74",
-      "startLine": 763,
-      "endLine": 764,
+      "startLine": 770,
+      "endLine": 771,
       "color": "orange",
       "text": "REVIEW portability: <MouseWheel>/event.delta is Windows+mac only — Linux/X11 sends Button-4/5 instead, so wheel scrolling silently does nothing there"
     },
     {
       "id": "b9833d8d",
-      "startLine": 781,
-      "endLine": 790,
+      "startLine": 788,
+      "endLine": 797,
       "color": "purple",
       "text": "REVIEW: edit mode is a second rendering pipeline (own gutter, wheel, highlight application) — the shared tokenizer is the key reuse, but UI tweaks must be made twice"
     },
     {
       "id": "48949801",
-      "startLine": 1015,
-      "endLine": 1016,
+      "startLine": 1022,
+      "endLine": 1023,
       "color": "yellow",
       "text": "PYTHON: `with open(...)` auto-closes the file even on error (RAII/using); errors='replace' swaps undecodable bytes for � — display-only lossiness, which is why edit mode re-reads strictly"
     },
     {
       "id": "8fc0d757",
-      "startLine": 1021,
-      "endLine": 1021,
+      "startLine": 1028,
+      "endLine": 1028,
       "color": "pink",
       "text": "PYTHON: list comprehension rebuilds every line; `or ['']` exploits truthiness (an empty list is false) to guarantee at least one line"
     },
     {
       "id": "aeabca96",
-      "startLine": 1124,
-      "endLine": 1125,
+      "startLine": 1131,
+      "endLine": 1132,
       "color": "orange",
       "text": "REVIEW: 0x0004 is the Ctrl bit of Tk's event.state bitmask (0x0001 = Shift, used in _code_release) — correct but undocumented magic numbers"
     },
     {
       "id": "284182d9",
-      "startLine": 1164,
-      "endLine": 1171,
+      "startLine": 1176,
+      "endLine": 1183,
       "color": "orange",
       "text": "Z-order trick: bands go below the code text, notes above — keeps glyphs crisp"
     },
     {
       "id": "34057bf7",
-      "startLine": 1208,
-      "endLine": 1208,
+      "startLine": 1220,
+      "endLine": 1220,
       "color": "pink",
       "text": "PYTHON: slices are 0-based and end-EXCLUSIVE — [lo-1:hi] converts the app's 1-based inclusive range; first place to look if a line-range bug ever appears"
     },
     {
       "id": "55357497",
-      "startLine": 1612,
-      "endLine": 1618,
+      "startLine": 1626,
+      "endLine": 1632,
       "color": "yellow",
       "text": "FIXED (crash-safety): saves write a sibling temp file then os.replace — opening the target with 'wb' would truncate it before writing"
     },
     {
-      "id": "6364f34e",
-      "startLine": 1641,
-      "endLine": 1642,
-      "color": "orange",
-      "text": "REVIEW: if the annotated region was deleted, the annotation keeps stale line numbers while other edits shift the file — consider flagging these as orphaned"
+      "id": "0b55dcb2",
+      "startLine": 1656,
+      "endLine": 1668,
+      "color": "green",
+      "text": "FIXED (was stale anchors): a fully deleted region collapses to its Tk mark's line and is flagged orphaned — dimmed band, dashed edge and a ⚠ note in the viewer; re-saving from the dialog clears the flag"
     },
     {
       "id": "7242661b",
-      "startLine": 1785,
-      "endLine": 1814,
+      "startLine": 1821,
+      "endLine": 1850,
       "color": "green",
       "text": "Gutter click/drag selects a line range, then release opens the annotation editor"
     },
     {
       "id": "684985cf",
-      "startLine": 1822,
-      "endLine": 1824,
+      "startLine": 1858,
+      "endLine": 1860,
       "color": "pink",
       "text": "PYTHON: next((x for x in seq if cond), default) = 'find first match or default' — the loop is implicit in the generator expression"
     },
     {
       "id": "2805f2f3",
-      "startLine": 1918,
-      "endLine": 1934,
+      "startLine": 1955,
+      "endLine": 1971,
       "color": "purple",
       "text": "CLI entry: optional folder plus -a/--annotations to relocate the annotation tree"
     },
     {
       "id": "a68da39c",
-      "startLine": 1937,
-      "endLine": 1938,
+      "startLine": 1974,
+      "endLine": 1975,
       "color": "purple",
       "text": "PYTHON: the file executes top-to-bottom on import; this guard runs main() only when launched as a program, keeping the pure functions importable and testable"
     }

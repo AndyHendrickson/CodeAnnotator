@@ -46,8 +46,11 @@ a git repo. The active annotation root is shown in the toolbar.
   `Ctrl+Shift+Z` redo). `Ctrl+S` (or the *Save* button) writes the file;
   *✓ Done* returns to the annotate view, prompting if there are unsaved
   changes. Annotation highlights ride along with the text while you edit, and
-  their saved line positions are updated on save. Editing requires the file
-  to be valid UTF-8; its newline style is preserved.
+  their saved line positions are updated on save. If an annotated region is
+  deleted entirely, its annotation collapses to the deletion point and is
+  marked *orphaned* (`⚠`, dimmed, dashed edge) rather than keeping stale line
+  numbers. Editing requires the file to be valid UTF-8; its newline style is
+  preserved.
 - **Annotate** — click or drag on the **line numbers** to pick a line range,
   then write a note and choose a highlight color. The annotation appears as a
   translucent color band over those lines with the note text floating at the
@@ -98,6 +101,10 @@ Each annotation file is plain JSON:
   folder), with forward slashes.
 - `startLine`/`endLine` are 1-based and inclusive.
 - `color` is one of `yellow`, `green`, `blue`, `pink`, `purple`, `orange`.
+- `orphaned` (optional, boolean) is set by the app when the annotated code
+  was deleted during an editing session: the annotation collapses to the
+  deletion point and is shown dimmed with a dashed edge and a `⚠ orphaned`
+  note prefix. Re-saving the annotation from its edit dialog clears the flag.
 - Files and mirrored directories are created on first save; when the last
   annotation on a file is removed, its file is deleted and empty directories
   are pruned.
