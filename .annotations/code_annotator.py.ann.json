@@ -1,0 +1,216 @@
+{
+  "version": 1,
+  "file": "code_annotator.py",
+  "annotations": [
+    {
+      "id": "0241b013",
+      "startLine": 2,
+      "endLine": 22,
+      "color": "blue",
+      "text": "Module doc: parallel-tree storage layout and the .ann.json schema"
+    },
+    {
+      "id": "20cf1270",
+      "startLine": 34,
+      "endLine": 42,
+      "color": "blue",
+      "text": "Tuning knobs: size/line caps, tab width, and directories hidden from the tree"
+    },
+    {
+      "id": "68ce74ee",
+      "startLine": 65,
+      "endLine": 71,
+      "color": "blue",
+      "text": "Annotation palette — blend() derives all translucent shades from these six"
+    },
+    {
+      "id": "f08799b3",
+      "startLine": 190,
+      "endLine": 207,
+      "color": "blue",
+      "text": "Extension → tokenizer config; unknown extensions fall back to plain text"
+    },
+    {
+      "id": "453b84b8",
+      "startLine": 223,
+      "endLine": 225,
+      "color": "green",
+      "text": "Core tokenizer: one pass per line; st carries block-comment/string state between lines"
+    },
+    {
+      "id": "1db7198a",
+      "startLine": 381,
+      "endLine": 389,
+      "color": "green",
+      "text": "A single shared state dict threads multi-line comments and strings across the file"
+    },
+    {
+      "id": "8566a90e",
+      "startLine": 394,
+      "endLine": 402,
+      "color": "orange",
+      "text": "The transparency illusion: overlay colors are pre-blended against the editor background"
+    },
+    {
+      "id": "8f3caf5d",
+      "startLine": 405,
+      "endLine": 414,
+      "color": "pink",
+      "text": "Walks up to .git — decides the base that annotation paths are relative to"
+    },
+    {
+      "id": "0fe30a31",
+      "startLine": 420,
+      "endLine": 424,
+      "color": "orange",
+      "text": "BUG (data loss): any parse error silently returns [] — the next save then OVERWRITES the corrupt file, erasing hand-edited annotations; surface load errors instead"
+    },
+    {
+      "id": "3f4d54d3",
+      "startLine": 435,
+      "endLine": 441,
+      "color": "pink",
+      "text": "PYTHON: annotations are plain dicts (string-keyed maps), not a class/struct — a typo'd key is only caught at runtime as a KeyError"
+    },
+    {
+      "id": "8ce10054",
+      "startLine": 446,
+      "endLine": 469,
+      "color": "yellow",
+      "text": "Persistence: writes into the mirror tree; removing the last annotation prunes empty dirs"
+    },
+    {
+      "id": "b14c4ef6",
+      "startLine": 525,
+      "endLine": 525,
+      "color": "orange",
+      "text": "PYTHON gotcha handled right: nm=name freezes the loop value — closures capture variables, not values, so without it every swatch would pick the LAST color"
+    },
+    {
+      "id": "cf5a8145",
+      "startLine": 544,
+      "endLine": 544,
+      "color": "pink",
+      "text": "PYTHON hack: builds a tuple to call _save() AND return 'break' in one expression — works, but a named two-line handler would be clearer"
+    },
+    {
+      "id": "544e6840",
+      "startLine": 607,
+      "endLine": 608,
+      "color": "purple",
+      "text": "REVIEW: ~1250-line god class, 60+ methods, many interacting mode flags (_edit_mode, _paste_ann, _dragged...) — consider extracting find/editor/annotation-store before the next big feature"
+    },
+    {
+      "id": "6aa10a74",
+      "startLine": 747,
+      "endLine": 748,
+      "color": "orange",
+      "text": "REVIEW portability: <MouseWheel>/event.delta is Windows+mac only — Linux/X11 sends Button-4/5 instead, so wheel scrolling silently does nothing there"
+    },
+    {
+      "id": "b9833d8d",
+      "startLine": 765,
+      "endLine": 774,
+      "color": "purple",
+      "text": "REVIEW: edit mode is a second rendering pipeline (own gutter, wheel, highlight application) — the shared tokenizer is the key reuse, but UI tweaks must be made twice"
+    },
+    {
+      "id": "77893f74",
+      "startLine": 977,
+      "endLine": 977,
+      "color": "orange",
+      "text": "BUG: rstrip strips a character SET, not a suffix — a filename ending in spaces or ● gets mangled; slice off the exact ' ●' suffix instead"
+    },
+    {
+      "id": "48949801",
+      "startLine": 997,
+      "endLine": 998,
+      "color": "yellow",
+      "text": "PYTHON: `with open(...)` auto-closes the file even on error (RAII/using); errors='replace' swaps undecodable bytes for � — display-only lossiness, which is why edit mode re-reads strictly"
+    },
+    {
+      "id": "8fc0d757",
+      "startLine": 1003,
+      "endLine": 1003,
+      "color": "pink",
+      "text": "PYTHON: list comprehension rebuilds every line; `or ['']` exploits truthiness (an empty list is false) to guarantee at least one line"
+    },
+    {
+      "id": "aeabca96",
+      "startLine": 1096,
+      "endLine": 1097,
+      "color": "orange",
+      "text": "REVIEW: 0x0004 is the Ctrl bit of Tk's event.state bitmask (0x0001 = Shift, used in _code_release) — correct but undocumented magic numbers"
+    },
+    {
+      "id": "284182d9",
+      "startLine": 1136,
+      "endLine": 1141,
+      "color": "orange",
+      "text": "Z-order trick: bands go below the code text, notes above — keeps glyphs crisp"
+    },
+    {
+      "id": "4608098f",
+      "startLine": 1138,
+      "endLine": 1138,
+      "color": "orange",
+      "text": "BUG (confirmed crash): if the file renders no code text (all blank lines) this raises TclError 'tagOrId \"code\" doesn’t match any items' — _draw_find/_set_selection guard with find_withtag first; this call doesn’t"
+    },
+    {
+      "id": "6493edf7",
+      "startLine": 1411,
+      "endLine": 1415,
+      "color": "orange",
+      "text": "REVIEW: each flash schedules a 4s clear but never cancels the previous timer, so an older timer wipes a newer message early — store the id and after_cancel it"
+    },
+    {
+      "id": "34057bf7",
+      "startLine": 1490,
+      "endLine": 1490,
+      "color": "pink",
+      "text": "PYTHON: slices are 0-based and end-EXCLUSIVE — [lo-1:hi] converts the app's 1-based inclusive range; first place to look if a line-range bug ever appears"
+    },
+    {
+      "id": "6c0b7364",
+      "startLine": 1579,
+      "endLine": 1580,
+      "color": "orange",
+      "text": "REVIEW: mode 'wb' truncates the file BEFORE writing — a crash mid-save destroys the source; write a temp file then os.replace() for an atomic save"
+    },
+    {
+      "id": "6364f34e",
+      "startLine": 1599,
+      "endLine": 1600,
+      "color": "orange",
+      "text": "REVIEW: if the annotated region was deleted, the annotation keeps stale line numbers while other edits shift the file — consider flagging these as orphaned"
+    },
+    {
+      "id": "7242661b",
+      "startLine": 1743,
+      "endLine": 1768,
+      "color": "green",
+      "text": "Gutter click/drag selects a line range, then release opens the annotation editor"
+    },
+    {
+      "id": "684985cf",
+      "startLine": 1776,
+      "endLine": 1778,
+      "color": "pink",
+      "text": "PYTHON: next((x for x in seq if cond), default) = 'find first match or default' — the loop is implicit in the generator expression"
+    },
+    {
+      "id": "2805f2f3",
+      "startLine": 1863,
+      "endLine": 1879,
+      "color": "purple",
+      "text": "CLI entry: optional folder plus -a/--annotations to relocate the annotation tree"
+    },
+    {
+      "id": "a68da39c",
+      "startLine": 1882,
+      "endLine": 1883,
+      "color": "purple",
+      "text": "PYTHON: the file executes top-to-bottom on import; this guard runs main() only when launched as a program, keeping the pure functions importable and testable"
+    }
+  ]
+}

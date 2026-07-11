@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "file": "examples/api_client.js",
+  "annotations": [
+    {
+      "id": "f45ad3c0",
+      "startLine": 6,
+      "endLine": 7,
+      "color": "blue",
+      "text": "Endpoint + retry budget"
+    },
+    {
+      "id": "5005b8bb",
+      "startLine": 22,
+      "endLine": 29,
+      "color": "green",
+      "text": "Read-through cache: GETs are memoized per path"
+    },
+    {
+      "id": "b5bbd399",
+      "startLine": 34,
+      "endLine": 44,
+      "color": "yellow",
+      "text": "Retry loop \u2014 429s trigger linear backoff instead of failing"
+    },
+    {
+      "id": "76f89d1f",
+      "startLine": 58,
+      "endLine": 60,
+      "color": "pink",
+      "text": "Promise-based sleep helper"
+    }
+  ]
+}

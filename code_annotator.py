@@ -1,0 +1,1883 @@
+#!/usr/bin/env python3
+"""Code Annotator — browse a project folder, view code files with syntax
+colorization, and overlay translucent annotations kept in a parallel tree.
+
+Annotations never live next to the source. They mirror the source layout
+under an annotation root: for ``<base>/src/foo.py`` the annotations are in
+``<ann_root>/src/foo.py.ann.json``, where ``<base>`` is the root of the git
+repository containing the opened folder (or the opened folder itself when
+not in a repo) and ``<ann_root>`` defaults to ``<base>/.annotations``.
+
+    {
+      "version": 1,
+      "file": "src/foo.py",
+      "annotations": [
+        {"id": "a1b2", "startLine": 10, "endLine": 14,
+         "color": "yellow", "text": "This block handles auth"}
+      ]
+    }
+
+Usage:  python code_annotator.py [folder] [-a/--annotations ANN_ROOT]
+
+Requires only the Python standard library (tkinter). Runs on Python 3.4+.
+"""
+
+import argparse
+import json
+import os
+import uuid
+import tkinter as tk
+from tkinter import ttk, filedialog, font as tkfont
+
+# ---------------------------------------------------------------- constants
+
+SIDECAR_SUFFIX = ".ann.json"
+ANN_DIR_NAME = ".annotations"
+MAX_FILE_BYTES = 2 * 1024 * 1024
+MAX_LINES = 8000
+TAB_WIDTH = 4
+
+SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".vs",
+             ".idea", "bin", "obj", "dist", "build", ".next", "venv",
+             ".venv", "target", ".mypy_cache", ".pytest_cache"}
+
+BG = "#1e1e1e"
+BG_PANEL = "#252526"
+BG_ACTIVE = "#37373d"
+FG = "#d4d4d4"
+FG_DIM = "#858585"
+GUTTER_FG = "#6e7681"
+ACCENT = "#0e639c"
+
+TOKEN_COLORS = {
+    "com": "#6a9955",
+    "str": "#ce9178",
+    "num": "#b5cea8",
+    "kw":  "#c586c0",
+    "lit": "#569cd6",
+    "typ": "#4ec9b0",
+    "fn":  "#dcdcaa",
+    "tag": "#569cd6",
+    "attr": "#9cdcfe",
+    None:  FG,
+}
+
+ANN_COLORS = {          # annotation highlight palette (full-strength RGB)
+    "yellow": (230, 190, 50),
+    "green":  (80, 200, 120),
+    "blue":   (70, 150, 255),
+    "pink":   (240, 100, 170),
+    "purple": (170, 110, 255),
+    "orange": (250, 140, 60),
+}
+
+# ------------------------------------------------------ syntax highlighting
+
+KEYWORDS = {
+    "py": """and as assert async await break class continue def del elif else
+        except finally for from global if import in is lambda nonlocal not or
+        pass raise return try while with yield match case""",
+    "js": """abstract as async await break case catch class const continue
+        debugger default delete do else enum export extends finally for from
+        function get if implements import in instanceof interface let new of
+        private protected public return set static super switch this throw
+        try type typeof var void while with yield""",
+    "cs": """abstract as base break case catch checked class const continue
+        default delegate do else enum event explicit extern finally fixed for
+        foreach goto if implicit in interface internal is lock namespace new
+        operator out override params private protected public readonly ref
+        return sealed static struct switch this throw try typeof unsafe using
+        var virtual volatile while get set async await record init required
+        partial when where yield""",
+    "c": """auto break case const continue default do else enum extern for
+        goto if inline register return signed sizeof static struct switch
+        typedef union unsigned volatile while class delete friend namespace
+        new operator private protected public template this throw try catch
+        typename using virtual override final constexpr nullptr""",
+    "java": """abstract assert break case catch class const continue default
+        do else enum extends final finally for goto if implements import
+        instanceof interface native new package private protected public
+        return static strictfp super switch synchronized this throw throws
+        transient try volatile while var record sealed permits yield""",
+    "go": """break case chan const continue default defer else fallthrough
+        for func go goto if import interface map package range return select
+        struct switch type var""",
+    "rust": """as async await break const continue crate dyn else enum extern
+        fn for if impl in let loop match mod move mut pub ref return self
+        static struct super trait type unsafe use where while""",
+    "sql": """select from where insert update delete into values set join
+        left right inner outer on group by order having limit offset union
+        all distinct as and or not null is in like between exists case when
+        then else end create table drop alter index view primary key foreign
+        references default unique check""",
+    "sh": """if then else elif fi for while until do done case esac function
+        in select return exit break continue local declare export readonly
+        unset shift eval exec source alias""",
+}
+
+LITERALS = {
+    "py": "True False None self cls",
+    "js": "true false null undefined NaN Infinity",
+    "cs": "true false null this value",
+    "c": "true false NULL nullptr this",
+    "java": "true false null this",
+    "go": "true false nil iota",
+    "rust": "true false Self self None Some Ok Err",
+    "sql": "true false null",
+    "sh": "true false",
+}
+
+TYPES = {
+    "py": """int float str bool list dict set tuple bytes object Exception
+        print len range type super isinstance""",
+    "js": """boolean number string object symbol bigint any unknown never
+        Array Object String Number Boolean Promise Map Set Date RegExp Error
+        console window document Math JSON""",
+    "cs": """bool byte char decimal double float int long object sbyte short
+        string uint ulong ushort void Task List Dictionary IEnumerable String
+        Console Exception""",
+    "c": """bool char double float int long short signed unsigned void size_t
+        int8_t int16_t int32_t int64_t uint8_t uint16_t uint32_t uint64_t std
+        string vector map""",
+    "java": """boolean byte char double float int long short void String
+        Integer Boolean Object List Map ArrayList HashMap System Exception""",
+    "go": """bool byte complex64 complex128 error float32 float64 int int8
+        int16 int32 int64 rune string uint uint8 uint16 uint32 uint64 uintptr""",
+    "rust": """bool char f32 f64 i8 i16 i32 i64 i128 isize str u8 u16 u32 u64
+        u128 usize String Vec Option Result Box HashMap""",
+    "sql": """int integer bigint smallint varchar char text date datetime
+        timestamp decimal numeric float real boolean blob""",
+    "sh": "echo printf read cd ls rm mv cp mkdir grep sed awk cat test",
+}
+
+
+def _word_map(lang_id):
+    words = {}
+    for w in KEYWORDS.get(lang_id, "").split():
+        words[w] = "kw"
+    for w in LITERALS.get(lang_id, "").split():
+        words[w] = "lit"
+    for w in TYPES.get(lang_id, "").split():
+        words[w] = "typ"
+    return words
+
+
+def _lang(lang_id, **opts):
+    cfg = {"words": _word_map(lang_id), "strings": "'\"",
+           "line": None, "block": None, "triple": False,
+           "template": False, "casefold": False, "html": False}
+    cfg.update(opts)
+    return cfg
+
+
+LANGS = {
+    "py":   _lang("py", line="#", triple=True),
+    "js":   _lang("js", line="//", block=("/*", "*/"), template=True),
+    "cs":   _lang("cs", line="//", block=("/*", "*/")),
+    "c":    _lang("c", line="//", block=("/*", "*/")),
+    "java": _lang("java", line="//", block=("/*", "*/")),
+    "go":   _lang("go", line="//", block=("/*", "*/"), template=True),
+    "rust": _lang("rust", line="//", block=("/*", "*/")),
+    "sql":  _lang("sql", line="--", block=("/*", "*/"), casefold=True),
+    "sh":   _lang("sh", line="#"),
+    "css":  _lang("css", block=("/*", "*/")),
+    "json": _lang("json"),
+    "html": {"html": True},
+    "plain": None,
+}
+LANGS["json"]["words"] = {"true": "lit", "false": "lit", "null": "lit"}
+
+EXT_LANG = {
+    "py": "py", "pyw": "py", "rb": "py", "lua": "py", "r": "py",
+    "js": "js", "jsx": "js", "ts": "js", "tsx": "js", "mjs": "js",
+    "cjs": "js", "vue": "js", "php": "js", "swift": "js", "dart": "js",
+    "cs": "cs",
+    "c": "c", "h": "c", "cpp": "c", "hpp": "c", "cc": "c", "cxx": "c",
+    "ino": "c",
+    "java": "java", "kt": "java", "kts": "java", "scala": "java",
+    "go": "go",
+    "rs": "rust",
+    "sql": "sql",
+    "sh": "sh", "bash": "sh", "zsh": "sh", "ps1": "sh", "psm1": "sh",
+    "bat": "sh", "cmd": "sh", "yml": "sh", "yaml": "sh", "toml": "sh",
+    "ini": "sh", "env": "sh", "gitignore": "sh",
+    "css": "css", "scss": "css", "less": "css",
+    "json": "json", "jsonc": "json",
+    "html": "html", "htm": "html", "xml": "html", "svg": "html",
+    "xaml": "html", "csproj": "html", "config": "html",
+}
+
+
+def lang_for(name):
+    lower = name.lower()
+    if lower in ("dockerfile", "makefile"):
+        return "sh"
+    ext = lower.rsplit(".", 1)[-1] if "." in lower else ""
+    return EXT_LANG.get(ext, "plain")
+
+
+def _ident_char(c):
+    return c.isalnum() or c in "_$"
+
+
+def scan_line(line, cfg, st):
+    """Tokenize one line. Yields (start_col, text, token_class).
+    ``st`` is a dict carrying multi-line state across calls."""
+    out = []
+    i, n = 0, len(line)
+    while i < n:
+        if st["mode"] == "block":
+            end = line.find(cfg["block"][1], i)
+            if end < 0:
+                out.append((i, line[i:], "com"))
+                return out
+            end += len(cfg["block"][1])
+            out.append((i, line[i:end], "com"))
+            i, st["mode"] = end, None
+            continue
+        if st["mode"] == "str":
+            end = line.find(st["delim"], i)
+            if end < 0:
+                out.append((i, line[i:], "str"))
+                return out
+            end += len(st["delim"])
+            out.append((i, line[i:end], "str"))
+            i, st["mode"] = end, None
+            continue
+
+        ch = line[i]
+        if cfg["block"] and line.startswith(cfg["block"][0], i):
+            end = line.find(cfg["block"][1], i + len(cfg["block"][0]))
+            if end < 0:
+                out.append((i, line[i:], "com"))
+                st["mode"] = "block"
+                return out
+            end += len(cfg["block"][1])
+            out.append((i, line[i:end], "com"))
+            i = end
+            continue
+        if cfg["line"] and line.startswith(cfg["line"], i):
+            out.append((i, line[i:], "com"))
+            return out
+        if cfg["triple"] and line[i:i + 3] in ("'''", '"""'):
+            delim = line[i:i + 3]
+            end = line.find(delim, i + 3)
+            if end < 0:
+                out.append((i, line[i:], "str"))
+                st["mode"], st["delim"] = "str", delim
+                return out
+            out.append((i, line[i:end + 3], "str"))
+            i = end + 3
+            continue
+        if cfg["template"] and ch == "`":
+            j = i + 1
+            while j < n and line[j] != "`":
+                j += 2 if line[j] == "\\" else 1
+            if j >= n:
+                out.append((i, line[i:], "str"))
+                st["mode"], st["delim"] = "str", "`"
+                return out
+            out.append((i, line[i:j + 1], "str"))
+            i = j + 1
+            continue
+        if ch in cfg["strings"]:
+            j = i + 1
+            while j < n and line[j] != ch:
+                j += 2 if line[j] == "\\" else 1
+            j = min(j + 1, n)
+            out.append((i, line[i:j], "str"))
+            i = j
+            continue
+        if ch.isdigit() or (ch == "." and i + 1 < n and line[i + 1].isdigit()):
+            j = i
+            while j < n and (line[j].isalnum() or line[j] in "._"):
+                j += 1
+            out.append((i, line[i:j], "num"))
+            i = j
+            continue
+        if ch.isalpha() or ch in "_$":
+            j = i
+            while j < n and _ident_char(line[j]):
+                j += 1
+            word = line[i:j]
+            key = word.lower() if cfg["casefold"] else word
+            cls = cfg["words"].get(key)
+            if cls is None and j < n and line[j] == "(":
+                cls = "fn"
+            out.append((i, word, cls))
+            i = j
+            continue
+        out.append((i, ch, None))
+        i += 1
+    return out
+
+
+def scan_html_line(line, st):
+    """Minimal HTML/XML tokenizer with cross-line comment/tag state."""
+    out = []
+    i, n = 0, len(line)
+    while i < n:
+        if st["mode"] == "comment":
+            end = line.find("-->", i)
+            if end < 0:
+                out.append((i, line[i:], "com"))
+                return out
+            out.append((i, line[i:end + 3], "com"))
+            i, st["mode"] = end + 3, None
+            continue
+        if st["mode"] == "tag":
+            ch = line[i]
+            if ch == ">":
+                out.append((i, ">", None))
+                i, st["mode"] = i + 1, None
+                continue
+            if ch in "'\"":
+                j = i + 1
+                while j < n and line[j] != ch:
+                    j += 1
+                j = min(j + 1, n)
+                out.append((i, line[i:j], "str"))
+                i = j
+                continue
+            if ch.isalpha() or ch in "_:-":
+                j = i
+                while j < n and (line[j].isalnum() or line[j] in "_:.-"):
+                    j += 1
+                out.append((i, line[i:j], "attr"))
+                i = j
+                continue
+            out.append((i, ch, None))
+            i += 1
+            continue
+        if line.startswith("<!--", i):
+            end = line.find("-->", i)
+            if end < 0:
+                out.append((i, line[i:], "com"))
+                st["mode"] = "comment"
+                return out
+            out.append((i, line[i:end + 3], "com"))
+            i = end + 3
+            continue
+        if line[i] == "<":
+            j = i + 1
+            if j < n and line[j] in "/!?":
+                j += 1
+            k = j
+            while k < n and (line[k].isalnum() or line[k] in "_:.-"):
+                k += 1
+            out.append((i, line[i:j], None))
+            if k > j:
+                out.append((j, line[j:k], "tag"))
+            i, st["mode"] = k, "tag"
+            continue
+        j = line.find("<", i)
+        if j < 0:
+            j = n
+        out.append((i, line[i:j], None))
+        i = j
+    return out
+
+
+def highlight_lines(lines, lang_id):
+    """Return per-line token lists for the whole file."""
+    cfg = LANGS.get(lang_id)
+    st = {"mode": None, "delim": ""}
+    if cfg is None:
+        return [[(0, ln, None)] if ln else [] for ln in lines]
+    if cfg.get("html"):
+        return [scan_html_line(ln, st) for ln in lines]
+    return [scan_line(ln, cfg, st) for ln in lines]
+
+
+# ------------------------------------------------------------------ helpers
+
+def blend(bg_hex, rgb, alpha):
+    """Alpha-blend an RGB tuple over a hex background color."""
+    br = int(bg_hex[1:3], 16)
+    bg = int(bg_hex[3:5], 16)
+    bb = int(bg_hex[5:7], 16)
+    r = round(br + (rgb[0] - br) * alpha)
+    g = round(bg + (rgb[1] - bg) * alpha)
+    b = round(bb + (rgb[2] - bb) * alpha)
+    return "#%02x%02x%02x" % (r, g, b)
+
+
+def find_git_root(path):
+    """Walk up from ``path`` looking for a .git entry; None if not in a repo."""
+    cur = os.path.abspath(path)
+    while True:
+        if os.path.exists(os.path.join(cur, ".git")):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+
+
+def load_annotations(ann_path):
+    if not os.path.isfile(ann_path):
+        return []
+    try:
+        with open(ann_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    result = []
+    for a in data.get("annotations", []):
+        try:
+            start, end = int(a["startLine"]), int(a["endLine"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if start < 1:
+            continue
+        text = str(a.get("text", ""))
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        result.append({
+            "id": str(a.get("id") or uuid.uuid4().hex[:8]),
+            "startLine": start,
+            "endLine": max(start, end),
+            "color": a.get("color") if a.get("color") in ANN_COLORS else "yellow",
+            "text": text,
+        })
+    result.sort(key=lambda a: a["startLine"])
+    return result
+
+
+def save_annotations(ann_path, rel_name, annotations, prune_root=None):
+    """Write (or remove) one annotation file inside the parallel tree.
+
+    When the last annotation goes away the file is deleted and any directories
+    left empty are pruned up to (but not including) ``prune_root``."""
+    if not annotations:
+        try:
+            os.remove(ann_path)
+        except OSError:
+            pass
+        if prune_root:
+            root = os.path.abspath(prune_root)
+            d = os.path.abspath(os.path.dirname(ann_path))
+            while d != root and d.startswith(root + os.sep):
+                try:
+                    os.rmdir(d)
+                except OSError:
+                    break
+                d = os.path.dirname(d)
+        return
+    os.makedirs(os.path.dirname(ann_path), exist_ok=True)
+    data = {"version": 1, "file": rel_name, "annotations": annotations}
+    with open(ann_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def comment_lines(text, lang_id):
+    """Render annotation text as source-comment lines for a language.
+    Returns a list of strings, or None when the language has no comment
+    syntax we know (json, plain)."""
+    cfg = LANGS.get(lang_id)
+    parts = text.split("\n")
+    if lang_id == "html":
+        return ["<!-- " + p + " -->" for p in parts]
+    if cfg and cfg.get("line"):
+        return [(cfg["line"] + " " + p).rstrip() for p in parts]
+    if cfg and cfg.get("block"):
+        return [cfg["block"][0] + " " + p + " " + cfg["block"][1]
+                for p in parts]
+    return None
+
+
+# ------------------------------------------------------------- edit dialog
+
+class AnnotationDialog(tk.Toplevel):
+    """Small popup to create/edit one annotation. Sets self.result to
+    'save', 'delete', or None (cancel)."""
+
+    def __init__(self, master, ann, is_new, x, y, can_paste=False):
+        super().__init__(master)
+        self.ann = ann
+        self.result = None
+        self.overrideredirect(True)
+        self.configure(bg=BG_PANEL, highlightbackground="#3c3c3c",
+                       highlightthickness=1)
+
+        rng = ("line %d" % ann["startLine"] if ann["startLine"] == ann["endLine"]
+               else "lines %d–%d" % (ann["startLine"], ann["endLine"]))
+        title = ("New annotation — " if is_new else "Edit annotation — ") + rng
+        tk.Label(self, text=title, bg=BG_PANEL, fg=FG_DIM,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10, pady=(8, 4))
+
+        self.text = tk.Text(self, width=42, height=4, bg=BG, fg=FG,
+                            insertbackground=FG, relief="flat",
+                            font=("Segoe UI", 10), wrap="word",
+                            highlightbackground="#3c3c3c", highlightthickness=1)
+        self.text.pack(padx=10, fill="x")
+        self.text.insert("1.0", ann["text"])
+
+        swatch_row = tk.Frame(self, bg=BG_PANEL)
+        swatch_row.pack(anchor="w", padx=10, pady=8)
+        self.color_var = tk.StringVar(value=ann["color"])
+        self._swatches = {}
+        for name, rgb in ANN_COLORS.items():
+            c = tk.Canvas(swatch_row, width=22, height=22, bg=BG_PANEL,
+                          highlightthickness=0, cursor="hand2")
+            c.create_oval(3, 3, 19, 19, fill="#%02x%02x%02x" % rgb,
+                          outline="", tags="dot")
+            c.pack(side="left", padx=2)
+            c.bind("<Button-1>", lambda e, nm=name: self._pick(nm))
+            self._swatches[name] = c
+        self._pick(ann["color"])
+
+        if can_paste:
+            self._button(self, "Insert into code as comment…", BG_ACTIVE, FG,
+                         self._paste).pack(fill="x", padx=10, pady=(0, 8))
+
+        btn_row = tk.Frame(self, bg=BG_PANEL)
+        btn_row.pack(fill="x", padx=10, pady=(0, 10))
+        self._button(btn_row, "Save", ACCENT, "#ffffff", self._save).pack(
+            side="left", expand=True, fill="x", padx=(0, 4))
+        if not is_new:
+            self._button(btn_row, "Delete", "#6e2020", "#f0b0b0", self._delete).pack(
+                side="left", expand=True, fill="x", padx=4)
+        self._button(btn_row, "Cancel", BG_ACTIVE, FG, self._cancel).pack(
+            side="left", expand=True, fill="x", padx=(4, 0))
+
+        self.bind("<Escape>", lambda e: self._cancel())
+        self.text.bind("<Control-Return>", lambda e: (self._save(), "break")[1])
+
+        self.update_idletasks()
+        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        x = max(0, min(x, self.winfo_screenwidth() - w - 10))
+        y = max(0, min(y + 14, self.winfo_screenheight() - h - 50))
+        self.geometry("+%d+%d" % (x, y))
+        self.transient(master)
+        self.grab_set()
+        self.text.focus_set()
+        # click outside the popup cancels it
+        self.bind("<Button-1>", self._maybe_cancel_outside)
+
+    @staticmethod
+    def _button(parent, label, bg, fg, cmd):
+        return tk.Button(parent, text=label, bg=bg, fg=fg, relief="flat",
+                         activebackground=bg, activeforeground=fg,
+                         font=("Segoe UI", 9), cursor="hand2", command=cmd)
+
+    def _maybe_cancel_outside(self, event):
+        if not (0 <= event.x <= self.winfo_width()
+                and 0 <= event.y <= self.winfo_height()):
+            self._cancel()
+
+    def _pick(self, name):
+        self.color_var.set(name)
+        for nm, canvas in self._swatches.items():
+            canvas.delete("ring")
+            if nm == name:
+                canvas.create_oval(1, 1, 21, 21, outline="#ffffff",
+                                   width=2, tags="ring")
+
+    def _save(self):
+        self.ann["text"] = self.text.get("1.0", "end").strip()
+        self.ann["color"] = self.color_var.get()
+        self.result = "save"
+        self._close()
+
+    def _paste(self):
+        self.ann["text"] = self.text.get("1.0", "end").strip()
+        self.ann["color"] = self.color_var.get()
+        self.result = "paste"
+        self._close()
+
+    def _delete(self):
+        self.result = "delete"
+        self._close()
+
+    def _cancel(self):
+        self.result = None
+        self._close()
+
+    def _close(self):
+        self.grab_release()
+        # an overrideredirect window that holds the grab AND keyboard focus
+        # leaves focus on None when destroyed, deadening all key bindings —
+        # hand focus back to the main window explicitly
+        self.master.focus_set()
+        self.destroy()
+
+
+# ------------------------------------------------------------------ the app
+
+class CodeAnnotatorApp:
+    def __init__(self, root, folder=None, ann_root=None):
+        self.root = root
+        root.title("Code Annotator")
+        root.geometry("1400x900")
+        root.configure(bg=BG)
+
+        self.code_font = tkfont.Font(family="Consolas", size=11)
+        self.note_font = tkfont.Font(family="Segoe UI", size=9, slant="italic")
+        self.char_w = self.code_font.measure("0")
+        self.line_h = self.code_font.metrics("linespace") + 4
+        self.pad = 8
+
+        self.folder = None
+        self.source_base = None        # paths in the ann tree are relative to this
+        self.ann_root = None           # root of the parallel annotation tree
+        self.ann_root_arg = os.path.abspath(ann_root) if ann_root else None
+        self.file_path = None          # currently open file
+        self.lines = []
+        self.annotations = []
+        self.content_width = 0
+        self.show_annotations = tk.BooleanVar(value=True)
+        self.opacity = tk.DoubleVar(value=55)
+        self._drag_start = None        # gutter drag anchor line
+        self._pending = None           # (lo, hi) line range being selected
+        self._item_by_path = {}        # tree item id lookup for badges
+        self._tokenized = []           # cached tokens so zoom can re-render
+        self._line_cols = []           # per-line code width, in columns
+        self._sel = None               # selected line range (lo, hi)
+        self._sel_anchor = None        # code-area drag anchor line
+        self._dragged = False          # True once a code-area drag moves
+        self._matches = []             # find results as (line, col, length)
+        self._match_idx = -1
+        self._last_query = ""
+        self._ann_idx = None           # annotation the user last jumped to
+        self._paste_ann = None         # annotation being placed as a comment
+        self._flash_msg = None         # transient status-bar message
+        self.lang_id = "plain"
+        self._truncated = False        # current file cut off at MAX_LINES
+        self._edit_mode = False        # editor swapped in for the canvas view
+        self._e_dirty = False          # unsaved editor changes
+        self._e_newline = "\n"         # newline style of the file being edited
+        self._e_line_tokens = []       # per-line token cache for re-highlight
+        self._e_hl_after = None        # pending debounced highlight callback
+        self._e_gutter_after = None    # pending gutter redraw callback
+
+        self._build_ui()
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
+        if folder:
+            self.open_folder(folder)
+
+    # ---------------------------------------------------------------- UI
+
+    def _build_ui(self):
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+        style.configure("Treeview", background=BG_PANEL, foreground=FG,
+                        fieldbackground=BG_PANEL, borderwidth=0,
+                        font=("Segoe UI", 10), rowheight=22)
+        style.map("Treeview", background=[("selected", BG_ACTIVE)],
+                  foreground=[("selected", "#ffffff")])
+        style.configure("Vertical.TScrollbar", background=BG_ACTIVE,
+                        troughcolor=BG_PANEL, borderwidth=0, arrowcolor=FG_DIM)
+        style.configure("Horizontal.TScrollbar", background=BG_ACTIVE,
+                        troughcolor=BG_PANEL, borderwidth=0, arrowcolor=FG_DIM)
+
+        # --- toolbar ---
+        bar = tk.Frame(self.root, bg=BG_PANEL)
+        bar.pack(fill="x")
+        tk.Button(bar, text="\U0001F4C2 Open Folder", command=self.pick_folder,
+                  bg=ACCENT, fg="#ffffff", relief="flat", cursor="hand2",
+                  font=("Segoe UI", 10), padx=10).pack(side="left", padx=8, pady=5)
+        self.edit_btn = tk.Button(bar, text="✎ Edit",
+                                  command=self._toggle_edit, bg=BG_ACTIVE,
+                                  fg=FG, relief="flat", cursor="hand2",
+                                  font=("Segoe UI", 10), padx=10)
+        self.edit_btn.pack(side="left", padx=(0, 4), pady=5)
+        self.save_btn = tk.Button(bar, text="\U0001F4BE Save",
+                                  command=self._save_edit, bg=BG_ACTIVE,
+                                  fg=FG, relief="flat", cursor="hand2",
+                                  font=("Segoe UI", 10), padx=10)
+        # save_btn is packed only while editing
+        self.folder_label = tk.Label(bar, text="No folder open", bg=BG_PANEL,
+                                     fg=FG_DIM, font=("Segoe UI", 10))
+        self.folder_label.pack(side="left", padx=4)
+
+        tk.Scale(bar, from_=10, to=100, orient="horizontal", length=110,
+                 variable=self.opacity, showvalue=False, bg=BG_PANEL,
+                 troughcolor=BG_ACTIVE, highlightthickness=0, sliderrelief="flat",
+                 command=lambda _v: self.draw_annotations()).pack(side="right", padx=(2, 12))
+        tk.Label(bar, text="Opacity", bg=BG_PANEL, fg=FG_DIM,
+                 font=("Segoe UI", 10)).pack(side="right")
+        tk.Checkbutton(bar, text="Annotations", variable=self.show_annotations,
+                       command=self.draw_annotations, bg=BG_PANEL, fg=FG_DIM,
+                       selectcolor=BG, activebackground=BG_PANEL,
+                       activeforeground=FG, font=("Segoe UI", 10)).pack(
+            side="right", padx=10)
+
+        # --- main split: tree | code view ---
+        paned = tk.PanedWindow(self.root, orient="horizontal", bg="#3c3c3c",
+                               sashwidth=4, borderwidth=0)
+        paned.pack(fill="both", expand=True)
+
+        tree_frame = tk.Frame(paned, bg=BG_PANEL)
+        self.tree = ttk.Treeview(tree_frame, show="tree", selectmode="browse",
+                                 columns=("path", "kind"), displaycolumns=())
+        tree_scroll = ttk.Scrollbar(tree_frame, orient="vertical",
+                                    command=self.tree.yview)
+        self.tree.configure(yscrollcommand=tree_scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        tree_scroll.pack(side="right", fill="y")
+        self.tree.bind("<<TreeviewOpen>>", self._on_tree_open)
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+        # pre-empt the Treeview class <Up>/<Down> bindings for Alt-arrows
+        self.tree.bind("<Alt-Up>", lambda e: self._goto_annotation(-1))
+        self.tree.bind("<Alt-Down>", lambda e: self._goto_annotation(1))
+        paned.add(tree_frame, minsize=180, width=300)
+
+        view = tk.Frame(paned, bg=BG)
+        paned.add(view, minsize=400)
+
+        self.gutter = tk.Canvas(view, width=56, bg=BG, highlightthickness=0,
+                                cursor="hand2")
+        self.gutter.pack(side="left", fill="y")
+        self.gutter.bind("<Button-1>", self._gutter_press)
+        self.gutter.bind("<B1-Motion>", self._gutter_drag)
+        self.gutter.bind("<ButtonRelease-1>", self._gutter_release)
+
+        code_frame = tk.Frame(view, bg=BG)
+        code_frame.pack(side="left", fill="both", expand=True)
+        self.code_frame = code_frame
+        self.canvas = tk.Canvas(code_frame, bg=BG, highlightthickness=0)
+        vbar = ttk.Scrollbar(code_frame, orient="vertical", command=self._yview)
+        self.hbar = ttk.Scrollbar(code_frame, orient="horizontal",
+                                  command=self.canvas.xview)
+        self.canvas.configure(yscrollcommand=vbar.set, xscrollcommand=self._on_xscroll)
+        vbar.pack(side="right", fill="y")
+        self.hbar.pack(side="bottom", fill="x")
+        self.canvas.pack(side="left", fill="both", expand=True)
+
+        for widget in (self.canvas, self.gutter):
+            widget.bind("<MouseWheel>", self._on_wheel)
+            widget.bind("<Up>", lambda e: self._scroll_lines(-1))
+            widget.bind("<Down>", lambda e: self._scroll_lines(1))
+            widget.bind("<Prior>", lambda e: self._scroll_pages(-1))
+            widget.bind("<Next>", lambda e: self._scroll_pages(1))
+            widget.bind("<Home>", lambda e: self._scroll_home_end(0))
+            widget.bind("<End>", lambda e: self._scroll_home_end(1))
+            widget.bind("<Alt-Up>", lambda e: self._goto_annotation(-1))
+            widget.bind("<Alt-Down>", lambda e: self._goto_annotation(1))
+        self.canvas.bind("<Configure>", lambda e: self.draw_annotations())
+        self.canvas.tag_bind("ann", "<ButtonRelease-1>", self._on_ann_click)
+        self.canvas.bind("<Button-1>", self._code_press)
+        self.canvas.bind("<B1-Motion>", self._code_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._code_release)
+        self._build_overlay_bars(code_frame)
+        self._bind_shortcuts()
+
+        # --- editor (edit mode; swapped in for the canvas view) ---
+        self.edit_frame = tk.Frame(view, bg=BG)
+        self.edit_gutter = tk.Canvas(self.edit_frame, width=56, bg=BG,
+                                     highlightthickness=0)
+        self.edit_gutter.pack(side="left", fill="y")
+        self.editor = tk.Text(self.edit_frame, bg=BG, fg=FG,
+                              insertbackground=FG, selectbackground="#264f78",
+                              relief="flat", borderwidth=0, wrap="none",
+                              undo=True, maxundo=-1, font=self.code_font,
+                              tabs=str(TAB_WIDTH * self.char_w))
+        self._e_vbar = ttk.Scrollbar(self.edit_frame, orient="vertical",
+                                     command=self.editor.yview)
+        e_hbar = ttk.Scrollbar(self.edit_frame, orient="horizontal",
+                               command=self.editor.xview)
+        self.editor.configure(yscrollcommand=self._e_on_yscroll,
+                              xscrollcommand=e_hbar.set)
+        self._e_vbar.pack(side="right", fill="y")
+        e_hbar.pack(side="bottom", fill="x")
+        self.editor.pack(side="left", fill="both", expand=True)
+        for cls, color in TOKEN_COLORS.items():
+            if cls:
+                self.editor.tag_configure("tok_" + cls, foreground=color)
+        self.editor.bind("<<Modified>>", self._e_on_modified)
+        self.editor.bind("<Configure>", lambda e: self._e_schedule_gutter())
+        self.editor.bind("<MouseWheel>", self._e_wheel)
+        self.edit_gutter.bind("<MouseWheel>", self._e_wheel)
+        self.editor.bind("<Control-Shift-Z>", self._e_redo)
+        self.editor.bind("<Control-s>", self._save_edit)
+        # keep the Text class's emacs-style Ctrl+F/G cursor motions from
+        # colliding with the app-level find/goto shortcuts
+        self.editor.bind("<Control-f>", lambda e: "break")
+        self.editor.bind("<Control-g>", lambda e: "break")
+
+        # --- status bar ---
+        status = tk.Frame(self.root, bg="#007acc")
+        status.pack(fill="x")
+        self.status_file = tk.Label(status, text="Ready", bg="#007acc",
+                                    fg="#ffffff", font=("Segoe UI", 9))
+        self.status_file.pack(side="left", padx=10)
+        self.status_hint = tk.Label(
+            status, text="Click or drag on line numbers to annotate • "
+                         "click a highlight to edit • Ctrl+F to search",
+            bg="#007acc", fg="#cde6f7", font=("Segoe UI", 9))
+        self.status_hint.pack(side="right", padx=10)
+
+        self._show_welcome()
+
+    def _show_welcome(self):
+        self.canvas.delete("all")
+        cx = max(360, self.canvas.winfo_width() // 2)
+        self.canvas.create_text(
+            cx, 120, fill=FG, font=("Segoe UI", 20), tags="welcome",
+            text="Code Annotator")
+        self.canvas.create_text(
+            cx, 190, fill=FG_DIM, font=("Segoe UI", 11), justify="center",
+            tags="welcome",
+            text="Open a project folder, pick a code file, and see its\n"
+                 "annotations overlaid transparently on the source.\n\n"
+                 "Click or drag on the line numbers to add an annotation.\n"
+                 "Click an existing highlight to edit it.\n\n"
+                 "Ctrl+F finds text, Ctrl+G jumps to a line, Ctrl+C copies\n"
+                 "selected lines, Ctrl+wheel or Ctrl+=/- zooms the code,\n"
+                 "Alt+Down/Alt+Up jump to the next/previous annotation.\n\n"
+                 "Notes are saved in a parallel tree that mirrors the\n"
+                 "source layout (default: <project>/" + ANN_DIR_NAME + "),\n"
+                 "so the source files themselves are never touched.")
+
+    def _build_overlay_bars(self, parent):
+        """Small floating bars (find, go-to-line) overlaid on the code view."""
+        entry_opts = dict(bg=BG, fg=FG, insertbackground=FG, relief="flat",
+                          font=("Segoe UI", 10),
+                          highlightbackground="#3c3c3c", highlightthickness=1)
+        btn_opts = dict(bg=BG_PANEL, fg=FG, relief="flat", cursor="hand2",
+                        activebackground=BG_ACTIVE, activeforeground=FG,
+                        font=("Segoe UI", 10), padx=6)
+
+        self.find_bar = tk.Frame(parent, bg=BG_PANEL,
+                                 highlightbackground="#3c3c3c",
+                                 highlightthickness=1)
+        self.find_entry = tk.Entry(self.find_bar, width=24, **entry_opts)
+        self.find_entry.pack(side="left", padx=(8, 4), pady=5)
+        self.find_count = tk.Label(self.find_bar, text="", width=9,
+                                   bg=BG_PANEL, fg=FG_DIM,
+                                   font=("Segoe UI", 9))
+        self.find_count.pack(side="left")
+        for label, cmd in (("‹", self._find_prev), ("›", self._find_next),
+                           ("✕", self._close_bars)):
+            tk.Button(self.find_bar, text=label, command=cmd,
+                      **btn_opts).pack(side="left", padx=(0, 2))
+        self.find_entry.bind("<KeyRelease>", self._on_find_key)
+        self.find_entry.bind("<Return>", self._find_next)
+        self.find_entry.bind("<Shift-Return>", self._find_prev)
+        self.find_entry.bind("<Escape>", self._close_bars)
+
+        self.goto_bar = tk.Frame(parent, bg=BG_PANEL,
+                                 highlightbackground="#3c3c3c",
+                                 highlightthickness=1)
+        tk.Label(self.goto_bar, text="Go to line:", bg=BG_PANEL, fg=FG_DIM,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(8, 4))
+        self.goto_entry = tk.Entry(self.goto_bar, width=8, **entry_opts)
+        self.goto_entry.pack(side="left", padx=(0, 8), pady=5)
+        self.goto_entry.bind("<Return>", self._goto_line)
+        self.goto_entry.bind("<Escape>", self._close_bars)
+
+    def _bind_shortcuts(self):
+        binds = (("<Control-f>", self._open_find),
+                 ("<Control-g>", self._open_goto),
+                 ("<F3>", self._find_next),
+                 ("<Shift-F3>", self._find_prev),
+                 ("<Escape>", self._close_bars),
+                 ("<Control-c>", self._copy_selection),
+                 ("<Control-plus>", lambda e: self._zoom(1)),
+                 ("<Control-equal>", lambda e: self._zoom(1)),
+                 ("<Control-minus>", lambda e: self._zoom(-1)),
+                 ("<Control-Key-0>", lambda e: self._zoom(0)),
+                 ("<Alt-Up>", lambda e: self._goto_annotation(-1)),
+                 ("<Alt-Down>", lambda e: self._goto_annotation(1)),
+                 ("<Return>", self._paste_default),
+                 ("<Control-s>", self._save_edit))
+        for seq, fn in binds:
+            self.root.bind(seq, fn)
+
+    # ------------------------------------------------------------ folder tree
+
+    def pick_folder(self):
+        folder = filedialog.askdirectory(title="Open project folder")
+        if folder:
+            self.open_folder(folder)
+
+    def open_folder(self, folder):
+        if self._edit_mode and not self._exit_edit():
+            return
+        folder = os.path.abspath(folder)
+        self.folder = folder
+        # annotation paths mirror the source tree relative to the git repo
+        # root (when inside one) so the same tree serves the whole repo
+        self.source_base = find_git_root(folder) or folder
+        self.ann_root = self.ann_root_arg or os.path.join(self.source_base,
+                                                          ANN_DIR_NAME)
+        self.folder_label.config(
+            text=folder + "   •   annotations: " + self.ann_root)
+        self._item_by_path.clear()
+        self.tree.delete(*self.tree.get_children())
+        root_item = self.tree.insert(
+            "", "end", text=" \U0001F4C1 " + (os.path.basename(folder) or folder),
+            values=[folder, "dir"], open=True)
+        self._populate_dir(root_item, folder)
+
+    def _rel_name(self, file_path):
+        """Path of a source file relative to the base, with forward slashes."""
+        return os.path.relpath(file_path, self.source_base).replace(os.sep, "/")
+
+    def sidecar_for(self, file_path):
+        """Location of a source file's annotation file in the parallel tree."""
+        rel = os.path.relpath(file_path, self.source_base)
+        return os.path.join(self.ann_root, rel + SIDECAR_SUFFIX)
+
+    def _populate_dir(self, item, path):
+        """Fill one tree directory node with its real children."""
+        try:
+            names = sorted(os.listdir(path),
+                           key=lambda n: (os.path.isfile(os.path.join(path, n)),
+                                          n.lower()))
+        except OSError as exc:
+            self.tree.insert(item, "end",
+                             text=" ⚠ " + (exc.strerror or str(exc)),
+                             values=["", "err"])
+            return
+        for name in names:
+            full = os.path.join(path, name)
+            if os.path.isdir(full):
+                if name in SKIP_DIRS:
+                    continue
+                if os.path.abspath(full) == os.path.abspath(self.ann_root):
+                    continue    # keep the annotation tree out of the browser
+                child = self.tree.insert(item, "end",
+                                         text=" \U0001F4C1 " + name,
+                                         values=[full, "dir"])
+                # dummy node so the expander arrow shows; filled lazily
+                self.tree.insert(child, "end", text="…", values=["", "dummy"])
+            else:
+                is_sidecar = name.endswith(SIDECAR_SUFFIX)
+                badge = " ●" if os.path.isfile(self.sidecar_for(full)) else ""
+                icon = "\U0001F3F7" if is_sidecar else "\U0001F4C4"
+                child = self.tree.insert(item, "end",
+                                         text=" " + icon + " " + name + badge,
+                                         values=[full, "file"])
+                self._item_by_path[full] = child
+
+    def _on_tree_open(self, _event):
+        item = self.tree.focus()
+        children = self.tree.get_children(item)
+        if len(children) == 1:
+            values = self.tree.item(children[0], "values")
+            if values and values[1] == "dummy":
+                self.tree.delete(children[0])
+                self._populate_dir(item, self.tree.item(item, "values")[0])
+
+    def _on_tree_select(self, _event):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        values = self.tree.item(sel[0], "values")
+        if values and values[1] == "file":
+            if self._edit_mode and not self._exit_edit():
+                return
+            self.open_file(values[0])
+
+    def _refresh_badge(self, file_path):
+        item = self._item_by_path.get(file_path)
+        if not item:
+            return
+        text = self.tree.item(item, "text").rstrip(" ●")
+        if os.path.isfile(self.sidecar_for(file_path)):
+            text += " ●"
+        self.tree.item(item, text=text)
+
+    # ------------------------------------------------------------- file view
+
+    def open_file(self, path):
+        try:
+            size = os.path.getsize(path)
+            if size > MAX_FILE_BYTES:
+                self._show_message("%s is too large to display (%.1f MB)."
+                                   % (os.path.basename(path), size / 1048576.0))
+                return
+            with open(path, "rb") as f:
+                head = f.read(8192)
+            if b"\x00" in head:
+                self._show_message(os.path.basename(path)
+                                   + " looks like a binary file.")
+                return
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError as exc:
+            self._show_message("Could not open file: %s" % exc)
+            return
+
+        lines = [ln.expandtabs(TAB_WIDTH) for ln in text.splitlines()] or [""]
+        truncated = len(lines) > MAX_LINES
+        if truncated:
+            lines = lines[:MAX_LINES]
+        self._truncated = truncated
+
+        self.file_path = path
+        self.lines = lines
+        self.annotations = load_annotations(self.sidecar_for(path))
+        self._pending = None
+        self._drag_start = None
+        self._sel = None
+        self._sel_anchor = None
+        self._ann_idx = None
+        self._paste_ann = None
+
+        lang_id = lang_for(os.path.basename(path))
+        self.lang_id = lang_id
+        self._tokenized = highlight_lines(lines, lang_id)
+        self._render_code(self._tokenized)
+        self.draw_annotations()
+        if self.find_bar.winfo_ismapped():
+            self._update_find()          # re-run the search in the new file
+        else:
+            self._matches, self._match_idx = [], -1
+
+        name = os.path.basename(path)
+        lang_note = "" if lang_id == "plain" else "  •  " + lang_id.upper()
+        trunc_note = ("  •  showing first %d lines" % MAX_LINES) if truncated else ""
+        self.status_file.config(text=name + lang_note + trunc_note)
+
+    def _show_message(self, msg):
+        self.file_path = None
+        self.lines = []
+        self.annotations = []
+        self._tokenized = []
+        self._line_cols = []
+        self._sel = None
+        self._matches, self._match_idx = [], -1
+        self._ann_idx = None
+        self._paste_ann = None
+        self.canvas.delete("all")
+        self.gutter.delete("all")
+        self.canvas.create_text(
+            max(360, self.canvas.winfo_width() // 2), 120,
+            fill=FG_DIM, font=("Segoe UI", 11), text=msg)
+        self.status_file.config(text="Ready")
+
+    def _render_code(self, tokenized):
+        canvas, lh = self.canvas, self.line_h
+        canvas.delete("all")
+        self.gutter.delete("all")
+
+        max_cols = 0
+        self._line_cols = []
+        for row, tokens in enumerate(tokenized):
+            y = self.pad + row * lh
+            for col, run, cls in tokens:
+                if not run.strip() and cls is None:
+                    continue
+                canvas.create_text(self.pad + col * self.char_w, y,
+                                   anchor="nw", text=run,
+                                   font=self.code_font,
+                                   fill=TOKEN_COLORS.get(cls, FG),
+                                   tags="code")
+            cols = tokens[-1][0] + len(tokens[-1][1]) if tokens else 0
+            self._line_cols.append(cols)
+            max_cols = max(max_cols, cols)
+
+        n = len(self.lines)
+        self.content_width = self.pad * 2 + max_cols * self.char_w + 300
+        height = self.pad * 2 + n * lh
+        canvas.configure(scrollregion=(0, 0, self.content_width, height),
+                         yscrollincrement=lh)
+
+        gutter_w = self.pad * 2 + max(2, len(str(n))) * self.char_w
+        for row in range(n):
+            self.gutter.create_text(gutter_w - self.pad, self.pad + row * lh,
+                                    anchor="ne", text=str(row + 1),
+                                    font=self.code_font, fill=GUTTER_FG,
+                                    tags="ln_%d" % (row + 1))
+        self.gutter.configure(width=gutter_w, yscrollincrement=lh,
+                              scrollregion=(0, 0, gutter_w, height))
+        self._yview("moveto", 0)
+        self.canvas.xview_moveto(0)
+
+    # ----------------------------------------------------- scrolling plumbing
+
+    def _yview(self, *args):
+        self.canvas.yview(*args)
+        self.gutter.yview(*args)
+
+    def _on_wheel(self, event):
+        if event.state & 0x0004:        # Ctrl held — zoom instead of scroll
+            return self._zoom(1 if event.delta > 0 else -1)
+        step = -1 if event.delta > 0 else 1
+        self.canvas.yview_scroll(step * 3, "units")
+        self.gutter.yview_scroll(step * 3, "units")
+        return "break"
+
+    def _on_xscroll(self, first, last):
+        # notes hug the right edge of the viewport and wrap to clear the
+        # code, so any horizontal viewport shift means a re-wrap
+        self.hbar.set(first, last)
+        self.draw_annotations()
+
+    # -------------------------------------------------------- overlay drawing
+
+    def _note_x(self):
+        return self.canvas.canvasx(self.canvas.winfo_width()) - 12
+
+    def draw_annotations(self, *_args):
+        canvas, lh = self.canvas, self.line_h
+        canvas.delete("ann")
+        canvas.delete("pending")
+        if not self.file_path:
+            return
+
+        alpha = self.opacity.get() / 100.0
+        if self.show_annotations.get():
+            for a in self.annotations:
+                rgb = ANN_COLORS[a["color"]]
+                y0 = self.pad + (a["startLine"] - 1) * lh
+                y1 = self.pad + min(a["endLine"], len(self.lines)) * lh
+                band = blend(BG, rgb, alpha * 0.45)
+                edge = blend(BG, rgb, min(1.0, alpha * 1.5))
+                tag = ("ann", "ann_" + a["id"])
+                canvas.create_rectangle(0, y0, self.content_width, y1,
+                                        fill=band, outline="", tags=tag)
+                canvas.create_rectangle(0, y0, 3, y1, fill=edge, outline="",
+                                        tags=tag)
+                if a["text"]:
+                    self._draw_note(a, y0, tag, alpha)
+            # highlight bands sit under the code so text stays crisp;
+            # note text stays on top
+            canvas.tag_lower("ann", "code")
+            canvas.tag_raise("note")
+            if canvas.find_withtag("find"):
+                canvas.tag_raise("find", "ann")   # search hits over the bands
+
+        if self._pending:
+            lo, hi = self._pending
+            y0 = self.pad + (lo - 1) * lh
+            y1 = self.pad + hi * lh
+            canvas.create_rectangle(0, y0, self.content_width, y1,
+                                    fill=blend(BG, (14, 99, 156), 0.35),
+                                    outline="", tags="pending")
+            canvas.tag_lower("pending", "code")
+
+        count = len(self.annotations)
+        hint = ("Click or drag on line numbers to annotate • "
+                "click a highlight to edit • Ctrl+F to search")
+        if count:
+            hint = "%d annotation%s  •  %s" % (count,
+                                               "s" if count != 1 else "", hint)
+        # don't clobber the placement prompt, a transient confirmation,
+        # or the edit-mode hint
+        if not (self._paste_ann or self._flash_msg or self._edit_mode):
+            self.status_hint.config(text=hint)
+
+    def _draw_note(self, a, y0, tag, alpha):
+        """Draw one note, word-wrapped so it stays clear of the code.
+
+        The wrap width is the gap between the right edge of the code and the
+        right edge of the viewport, over the lines the note vertically covers.
+        Wrapping narrower makes the note taller (covering more code lines), so
+        the cleared range is grown iteratively until the layout settles. When
+        the gap is hopeless the width is clamped and the note may overlap."""
+        nx = self._note_x()
+        lo = a["startLine"]
+        gap, min_w = 24, 80
+
+        def avail(hi):
+            hi = max(lo, min(hi, len(self._line_cols)))
+            cols = max(self._line_cols[lo - 1:hi] or [0])
+            return int(nx - gap - (self.pad + cols * self.char_w))
+
+        hi_cover = min(a["endLine"], len(self.lines))
+        width = max(min_w, avail(hi_cover))
+        note_fill = blend(BG, (255, 255, 255), min(1.0, 0.35 + alpha * 0.65))
+        item = self.canvas.create_text(
+            nx, y0 + 2, anchor="ne", width=width, justify="right",
+            text="\U0001F3F7 " + a["text"], font=self.note_font,
+            fill=note_fill, tags=tag + ("note",))
+        for _ in range(6):
+            bottom = self.canvas.bbox(item)[3]
+            covered = int((bottom - self.pad) // self.line_h) + 1
+            if covered <= hi_cover or hi_cover >= len(self.lines):
+                break
+            hi_cover = min(covered, len(self.lines))
+            new_w = max(min_w, avail(hi_cover))
+            if new_w >= width:
+                break
+            width = new_w
+            self.canvas.itemconfig(item, width=new_w)
+
+    # ---------------------------------------- find / go to line / navigation
+
+    def _open_find(self, _event=None):
+        if self._edit_mode or not self.file_path:
+            return "break"
+        self.goto_bar.place_forget()
+        self.find_bar.place(relx=1.0, x=-24, y=8, anchor="ne")
+        self.find_entry.focus_set()
+        self.find_entry.select_range(0, "end")
+        self._update_find()
+        return "break"
+
+    def _open_goto(self, _event=None):
+        if self._edit_mode or not self.file_path:
+            return "break"
+        self.find_bar.place_forget()
+        self.goto_bar.place(relx=1.0, x=-24, y=8, anchor="ne")
+        self.goto_entry.delete(0, "end")
+        self.goto_entry.focus_set()
+        return "break"
+
+    def _close_bars(self, _event=None):
+        if self._edit_mode:
+            return
+        if not (self.find_bar.winfo_ismapped() or self.goto_bar.winfo_ismapped()
+                or self._sel or self._matches or self._paste_ann):
+            return
+        self._paste_ann = None
+        self.find_bar.place_forget()
+        self.goto_bar.place_forget()
+        self._matches, self._match_idx = [], -1
+        self._last_query = ""
+        self.canvas.delete("find")
+        self._set_selection(None)
+        self.draw_annotations()          # restores the default status hint
+        self.canvas.focus_set()
+
+    def _on_find_key(self, _event=None):
+        if self.find_entry.get() != self._last_query:
+            self._update_find()
+
+    def _update_find(self):
+        query = self.find_entry.get()
+        self._last_query = query
+        self._matches, self._match_idx = [], -1
+        self.canvas.delete("find")
+        if query and self.file_path:
+            q = query.lower()
+            for row, line in enumerate(self.lines):
+                low, start = line.lower(), 0
+                while len(self._matches) < 2000:
+                    col = low.find(q, start)
+                    if col < 0:
+                        break
+                    self._matches.append((row + 1, col, len(query)))
+                    start = col + len(q)
+                if len(self._matches) >= 2000:
+                    break
+        if self._matches:
+            self._goto_match(0)
+        else:
+            self.find_count.config(text="no results" if query else "")
+
+    def _draw_find(self):
+        canvas = self.canvas
+        canvas.delete("find")
+        for idx, (ln, col, length) in enumerate(self._matches):
+            x0 = self.pad + col * self.char_w
+            y0 = self.pad + (ln - 1) * self.line_h
+            current = idx == self._match_idx
+            canvas.create_rectangle(
+                x0 - 1, y0 + 1, x0 + length * self.char_w + 1,
+                y0 + self.line_h - 1,
+                fill=blend(BG, (210, 170, 60), 0.5 if current else 0.25),
+                outline="#d7ba7d" if current else "", tags="find")
+        if canvas.find_withtag("find") and canvas.find_withtag("code"):
+            canvas.tag_lower("find", "code")
+            if canvas.find_withtag("ann"):
+                canvas.tag_raise("find", "ann")
+
+    def _goto_match(self, idx):
+        if self._edit_mode or not self._matches:
+            return "break"
+        self._match_idx = idx % len(self._matches)
+        self._draw_find()
+        ln, col, _length = self._matches[self._match_idx]
+        self._scroll_to_line(ln)
+        x0 = self.pad + col * self.char_w
+        left = self.canvas.canvasx(0)
+        view_w = self.canvas.winfo_width()
+        if not (left <= x0 <= left + view_w - 80):
+            self.canvas.xview_moveto(
+                max(0.0, (x0 - view_w / 3.0) / max(1, self.content_width)))
+        self.find_count.config(text="%d of %d" % (self._match_idx + 1,
+                                                  len(self._matches)))
+        return "break"
+
+    def _find_next(self, _event=None):
+        return self._goto_match(self._match_idx + 1)
+
+    def _find_prev(self, _event=None):
+        return self._goto_match(self._match_idx - 1)
+
+    def _goto_line(self, _event=None):
+        try:
+            ln = int(self.goto_entry.get().strip())
+        except ValueError:
+            return "break"
+        ln = max(1, min(len(self.lines), ln))
+        self.goto_bar.place_forget()
+        self._scroll_to_line(ln)
+        self._set_selection((ln, ln))
+        self.canvas.focus_set()
+        return "break"
+
+    def _scroll_to_line(self, ln):
+        """Scroll vertically (if needed) so line ``ln`` is comfortably visible."""
+        y = self.pad + (ln - 1) * self.line_h
+        top = self.canvas.canvasy(0)
+        view_h = self.canvas.winfo_height()
+        if not (top + self.line_h <= y <= top + view_h - 2 * self.line_h):
+            total = self.pad * 2 + len(self.lines) * self.line_h
+            self._yview("moveto", max(0.0, (y - view_h / 3.0) / total))
+
+    def _line_visible(self, ln):
+        y = self.pad + (ln - 1) * self.line_h
+        top = self.canvas.canvasy(0)
+        return top <= y <= top + self.canvas.winfo_height() - self.line_h
+
+    def _goto_annotation(self, step, _event=None):
+        """Alt+Down / Alt+Up: cycle to the next / previous annotation."""
+        if self._edit_mode:
+            return
+        anns = self.annotations           # kept sorted by startLine
+        if not (self.file_path and anns):
+            return "break"
+        idx = self._ann_idx
+        if (idx is not None and 0 <= idx < len(anns)
+                and self._line_visible(anns[idx]["startLine"])):
+            idx = (idx + step) % len(anns)
+        else:
+            # lost track (scrolled away, file changed): pick relative to
+            # the view — next scans down from its top edge, previous scans
+            # up from its bottom edge, so visible annotations come first
+            top = int((self.canvas.canvasy(0) - self.pad) // self.line_h) + 1
+            if step > 0:
+                idx = next((i for i, a in enumerate(anns)
+                            if a["startLine"] > top), 0)
+            else:
+                bottom = top + self.canvas.winfo_height() // self.line_h
+                idx = next((i for i in range(len(anns) - 1, -1, -1)
+                            if anns[i]["startLine"] < bottom),
+                           len(anns) - 1)
+        self._ann_idx = idx
+        a = anns[idx]
+        self._scroll_to_line(a["startLine"])
+        self._flash_annotation(a)
+        note = a["text"].replace("\n", " ")
+        if len(note) > 60:
+            note = note[:57] + "..."
+        self.status_hint.config(
+            text="Annotation %d of %d%s" %
+                 (idx + 1, len(anns), "  •  " + note if note else ""))
+        return "break"
+
+    def _flash_annotation(self, a):
+        """Briefly outline an annotation's band so the jump target is obvious."""
+        y0 = self.pad + (a["startLine"] - 1) * self.line_h
+        y1 = self.pad + min(a["endLine"], len(self.lines)) * self.line_h
+        rgb = ANN_COLORS[a["color"]]
+        rect = self.canvas.create_rectangle(
+            1, y0, self.content_width - 1, y1,
+            outline="#%02x%02x%02x" % rgb, width=2)
+        self.root.after(700, lambda: self.canvas.delete(rect))
+
+    def _scroll_lines(self, n):
+        self.canvas.yview_scroll(n, "units")
+        self.gutter.yview_scroll(n, "units")
+        return "break"
+
+    def _scroll_pages(self, n):
+        self.canvas.yview_scroll(n, "pages")
+        self.gutter.yview_scroll(n, "pages")
+        return "break"
+
+    def _scroll_home_end(self, frac):
+        self._yview("moveto", frac)
+        return "break"
+
+    def _zoom(self, delta, _event=None):
+        cur = self.code_font.cget("size")
+        size = 11 if delta == 0 else max(6, min(28, cur + delta))
+        if size != cur:
+            self.code_font.configure(size=size)
+            self.note_font.configure(size=max(7, size - 2))
+            self.char_w = self.code_font.measure("0")
+            self.line_h = self.code_font.metrics("linespace") + 4
+            if self._edit_mode:
+                # the Text widget follows the shared named font by itself
+                self.editor.configure(tabs=str(TAB_WIDTH * self.char_w))
+                self._e_schedule_gutter()
+            elif self.file_path:
+                first = self.canvas.yview()[0]
+                self._render_code(self._tokenized)
+                self.draw_annotations()
+                self._draw_find()
+                self._set_selection(self._sel)
+                self._yview("moveto", first)
+        return "break"
+
+    # -------------------------------------------------- line selection / copy
+
+    def _flash_status(self, text, ms=4000):
+        """Show a status-bar message that survives redraws for a few seconds."""
+        self._flash_msg = text
+        self.status_hint.config(text=text)
+        self.root.after(ms, self._clear_flash)
+
+    def _clear_flash(self):
+        self._flash_msg = None
+        if self._edit_mode:
+            self._set_edit_hint()
+        else:
+            self.draw_annotations()      # restores the regular hint
+
+    def _canvas_line(self, event):
+        y = self.canvas.canvasy(event.y) - self.pad
+        return max(1, min(len(self.lines), int(y // self.line_h) + 1))
+
+    def _code_press(self, event):
+        if not self.file_path:
+            return
+        self.canvas.focus_set()
+        if self._paste_ann:
+            self._dragged = True         # swallow the matching release/click
+            self._paste_comment_at(self._canvas_line(event))
+            return
+        self._dragged = False
+        self._sel_anchor = self._canvas_line(event)
+
+    def _code_drag(self, event):
+        if self._sel_anchor is None:
+            return
+        line = self._canvas_line(event)
+        if line != self._sel_anchor:
+            self._dragged = True
+        if self._dragged:
+            self._set_selection((min(self._sel_anchor, line),
+                                 max(self._sel_anchor, line)))
+
+    def _code_release(self, event):
+        if self._sel_anchor is None:
+            return
+        self._sel_anchor = None
+        if self._dragged:
+            return
+        line = self._canvas_line(event)
+        if (event.state & 0x0001) and self._sel:      # Shift-click extends
+            lo, hi = self._sel
+            self._set_selection((min(lo, line), max(hi, line)))
+        elif self._sel == (line, line):
+            self._set_selection(None)                 # click again to clear
+        else:
+            self._set_selection((line, line))
+
+    def _set_selection(self, sel):
+        self._sel = sel
+        self.canvas.delete("sel")
+        if not sel:
+            return
+        lo, hi = sel
+        y0 = self.pad + (lo - 1) * self.line_h
+        y1 = self.pad + hi * self.line_h
+        self.canvas.create_rectangle(0, y0, self.content_width, y1,
+                                     fill=blend(BG, (130, 160, 190), 0.16),
+                                     outline="", tags="sel")
+        if self.canvas.find_withtag("code"):
+            self.canvas.tag_lower("sel", "code")
+        n = hi - lo + 1
+        self.status_hint.config(
+            text="%d line%s selected  •  Ctrl+C to copy" %
+                 (n, "s" if n != 1 else ""))
+
+    def _copy_selection(self, _event=None):
+        widget = self.root.focus_get()
+        if isinstance(widget, (tk.Entry, tk.Text)):
+            return                       # let the field's own copy work
+        if not (self.file_path and self._sel):
+            return
+        lo, hi = self._sel
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join(self.lines[lo - 1:hi]))
+        n = hi - lo + 1
+        self._flash_status("Copied %d line%s to clipboard" %
+                           (n, "s" if n != 1 else ""))
+
+    # ---------------------------------------------------------- edit mode
+
+    def _toggle_edit(self):
+        if self._edit_mode:
+            self._exit_edit()
+        else:
+            self._enter_edit()
+
+    def _enter_edit(self):
+        if self._edit_mode:
+            return
+        if not self.file_path:
+            self._flash_status("Open a file first")
+            return
+        if self._truncated:
+            self._flash_status("File is truncated in this view — too large "
+                               "to edit here")
+            return
+        try:
+            with open(self.file_path, "rb") as f:
+                raw = f.read()
+            content = raw.decode("utf-8")
+        except OSError as exc:
+            self._flash_status("Could not read file: %s" % exc)
+            return
+        except UnicodeDecodeError:
+            self._flash_status("File is not valid UTF-8 — editing disabled")
+            return
+        self._close_bars()               # drop find/selection/paste state
+        self._e_newline = "\r\n" if b"\r\n" in raw else "\n"
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
+
+        self.editor.delete("1.0", "end")
+        self.editor.insert("1.0", content)
+        self.editor.edit_reset()         # no undo step back to emptiness
+        self.editor.edit_modified(False)
+        self._e_dirty = False
+        self._e_line_tokens = []
+        self._edit_mode = True
+
+        self.gutter.pack_forget()
+        self.code_frame.pack_forget()
+        self.edit_frame.pack(fill="both", expand=True)
+        self.edit_btn.config(text="✓ Done")
+        self.save_btn.pack(side="left", padx=(0, 4), pady=5,
+                           after=self.edit_btn)
+        self._e_apply_highlight()
+        self._e_apply_bands()
+        self._e_schedule_gutter()
+        self.editor.mark_set("insert", "1.0")
+        self.editor.focus_set()
+        self._update_edit_title()
+        self._set_edit_hint()
+
+    def _exit_edit(self):
+        """Leave edit mode; returns False if the user cancelled."""
+        if not self._edit_mode:
+            return True
+        if self._e_dirty:
+            from tkinter import messagebox
+            resp = messagebox.askyesnocancel(
+                "Unsaved changes",
+                "Save changes to %s?" % os.path.basename(self.file_path))
+            if resp is None:
+                return False
+            if resp:
+                self._save_edit()
+        self._edit_mode = False
+        self._e_dirty = False
+        self.edit_frame.pack_forget()
+        self.gutter.pack(side="left", fill="y")
+        self.code_frame.pack(side="left", fill="both", expand=True)
+        self.edit_btn.config(text="✎ Edit")
+        self.save_btn.pack_forget()
+        self.open_file(self.file_path)   # re-render the (possibly new) source
+        return True
+
+    def _save_edit(self, _event=None):
+        if not self._edit_mode:
+            return
+        text = self.editor.get("1.0", "end-1c")
+        if self._e_newline != "\n":
+            text = text.replace("\n", self._e_newline)
+        try:
+            with open(self.file_path, "wb") as f:
+                f.write(text.encode("utf-8"))
+        except OSError as exc:
+            from tkinter import messagebox
+            messagebox.showerror("Save failed",
+                                 "Could not write the source file:\n%s" % exc)
+            return "break"
+        self._e_sync_annotations()
+        self._e_dirty = False
+        self.editor.edit_modified(False)
+        self._update_edit_title()
+        self._flash_status("Saved %s" % os.path.basename(self.file_path))
+        return "break"
+
+    def _e_sync_annotations(self):
+        """Re-anchor annotations from their band tags, which move with the
+        text as it is edited, then persist any changes."""
+        changed = False
+        for a in self.annotations:
+            rng = self.editor.tag_ranges("eband_" + a["id"])
+            if not rng:
+                continue                 # annotated region deleted; keep as-is
+            start = int(str(rng[0]).split(".")[0])
+            end_ln, end_col = (int(v) for v in str(rng[-1]).split("."))
+            if end_col == 0:             # band ends at a line start: exclusive
+                end_ln -= 1
+            end_ln = max(start, end_ln)
+            if (start, end_ln) != (a["startLine"], a["endLine"]):
+                a["startLine"], a["endLine"] = start, end_ln
+                changed = True
+        if changed:
+            self.annotations.sort(key=lambda a: a["startLine"])
+            self._persist()
+
+    def _e_apply_bands(self):
+        """Show annotation ranges as background tags in the editor."""
+        alpha = self.opacity.get() / 100.0
+        total = int(self.editor.index("end-1c").split(".")[0])
+        for a in self.annotations:
+            tag = "eband_" + a["id"]
+            self.editor.tag_configure(
+                tag, background=blend(BG, ANN_COLORS[a["color"]],
+                                      alpha * 0.45))
+            start = min(a["startLine"], total)
+            end = min(a["endLine"], total)
+            self.editor.tag_add(tag, "%d.0" % start, "%d.0" % (end + 1))
+            self.editor.tag_lower(tag)
+        self.editor.tag_raise("sel")     # selection stays visible over bands
+
+    def _set_edit_hint(self):
+        self.status_hint.config(
+            text="Editing • Ctrl+Z undo • Ctrl+Y redo • Ctrl+S save • "
+                 "Done returns to the annotate view")
+
+    def _update_edit_title(self):
+        if self._edit_mode and self.file_path:
+            self.status_file.config(
+                text="%s  •  editing%s" % (os.path.basename(self.file_path),
+                                           "  ●" if self._e_dirty else ""))
+
+    def _e_on_modified(self, _event=None):
+        if not self.editor.edit_modified():
+            return
+        self.editor.edit_modified(False)   # re-arm the <<Modified>> event
+        if not self._edit_mode:
+            return                         # programmatic load/teardown
+        self._e_dirty = True
+        self._update_edit_title()
+        self._e_schedule_highlight()
+        self._e_schedule_gutter()
+
+    def _e_redo(self, _event=None):
+        try:
+            self.editor.edit_redo()
+        except tk.TclError:
+            pass                           # nothing to redo
+        return "break"
+
+    def _e_wheel(self, event):
+        if event.state & 0x0004:
+            return self._zoom(1 if event.delta > 0 else -1)
+        self.editor.yview_scroll(-3 if event.delta > 0 else 3, "units")
+        return "break"
+
+    def _e_on_yscroll(self, first, last):
+        self._e_vbar.set(first, last)
+        self._e_schedule_gutter()
+
+    def _e_schedule_gutter(self):
+        if self._e_gutter_after is None:
+            self._e_gutter_after = self.root.after_idle(self._e_redraw_gutter)
+
+    def _e_redraw_gutter(self):
+        self._e_gutter_after = None
+        gutter = self.edit_gutter
+        gutter.delete("all")
+        if not self._edit_mode:
+            return
+        total = int(self.editor.index("end-1c").split(".")[0])
+        gutter_w = self.pad * 2 + max(2, len(str(total))) * self.char_w
+        gutter.configure(width=gutter_w)
+        ln = int(self.editor.index("@0,0").split(".")[0])
+        while ln <= total:
+            dli = self.editor.dlineinfo("%d.0" % ln)
+            if dli is None:
+                break
+            gutter.create_text(gutter_w - self.pad, dli[1], anchor="ne",
+                               text=str(ln), font=self.code_font,
+                               fill=GUTTER_FG)
+            ln += 1
+
+    def _e_schedule_highlight(self):
+        if self._e_hl_after is not None:
+            self.root.after_cancel(self._e_hl_after)
+        self._e_hl_after = self.root.after(150, self._e_apply_highlight)
+
+    def _e_apply_highlight(self):
+        """Re-tokenize the editor text and retag only the changed lines."""
+        self._e_hl_after = None
+        lines = self.editor.get("1.0", "end-1c").split("\n")
+        tokenized = highlight_lines(lines, self.lang_id)
+        old = self._e_line_tokens
+        add = {}                           # token class -> flat index list
+        dirty = []                         # 1-based lines needing a retag
+        for i, tokens in enumerate(tokenized):
+            if i < len(old) and old[i] == tokens:
+                continue
+            dirty.append(i + 1)
+            for col, run, cls in tokens:
+                if cls:
+                    add.setdefault(cls, []).extend(
+                        ("%d.%d" % (i + 1, col),
+                         "%d.%d" % (i + 1, col + len(run))))
+        if dirty:
+            spans, lo = [], dirty[0]
+            prev = lo
+            for ln in dirty[1:]:
+                if ln != prev + 1:
+                    spans.append((lo, prev))
+                    lo = ln
+                prev = ln
+            spans.append((lo, prev))
+            for cls in TOKEN_COLORS:
+                if not cls:
+                    continue
+                for s, e in spans:
+                    self.editor.tag_remove("tok_" + cls,
+                                           "%d.0" % s, "%d.0" % (e + 1))
+        for cls, idxs in add.items():
+            for k in range(0, len(idxs), 2048):
+                self.editor.tag_add("tok_" + cls, *idxs[k:k + 2048])
+        self._e_line_tokens = tokenized
+
+    def _on_close(self):
+        if self._edit_mode and not self._exit_edit():
+            return                         # user cancelled the close
+        self.root.destroy()
+
+    # -------------------------------------------------- annotation interaction
+
+    def _gutter_line(self, event):
+        y = self.gutter.canvasy(event.y) - self.pad
+        return max(1, min(len(self.lines), int(y // self.line_h) + 1))
+
+    def _gutter_press(self, event):
+        if not self.file_path:
+            return
+        if self._paste_ann:
+            self._paste_comment_at(self._gutter_line(event))
+            return
+        self._drag_start = self._gutter_line(event)
+        self._pending = (self._drag_start, self._drag_start)
+        self.draw_annotations()
+
+    def _gutter_drag(self, event):
+        if self._drag_start is None:
+            return
+        line = self._gutter_line(event)
+        self._pending = (min(self._drag_start, line), max(self._drag_start, line))
+        self.draw_annotations()
+
+    def _gutter_release(self, event):
+        if self._drag_start is None or not self._pending:
+            return
+        lo, hi = self._pending
+        self._drag_start = None
+        ann = {"id": uuid.uuid4().hex[:8], "startLine": lo, "endLine": hi,
+               "color": "yellow", "text": ""}
+        self._edit_annotation(ann, is_new=True,
+                              x=event.x_root, y=event.y_root)
+
+    def _on_ann_click(self, event):
+        if self._dragged:
+            return                       # end of a drag-selection, not a click
+        items = self.canvas.find_withtag("current")
+        if not items:
+            return
+        ann_id = next((t.split("_", 1)[1] for t in self.canvas.gettags(items[0])
+                       if t.startswith("ann_")), None)
+        ann = next((a for a in self.annotations if a["id"] == ann_id), None)
+        if ann:
+            self._edit_annotation(ann, is_new=False,
+                                  x=event.x_root, y=event.y_root)
+
+    def _edit_annotation(self, ann, is_new, x, y):
+        can_paste = (comment_lines("x", self.lang_id) is not None
+                     and not self._truncated)
+        dialog = AnnotationDialog(self.root, ann, is_new, x, y,
+                                  can_paste=can_paste)
+        self.root.wait_window(dialog)
+        self.canvas.focus_set()          # keyboard focus back to the app
+        self._pending = None
+        if dialog.result in ("save", "paste"):
+            if is_new:
+                self.annotations.append(ann)
+                self.annotations.sort(key=lambda a: a["startLine"])
+            self._ann_idx = None         # indices shifted; re-anchor on jump
+            self._persist()
+        elif dialog.result == "delete":
+            self.annotations = [a for a in self.annotations
+                                if a["id"] != ann["id"]]
+            self._ann_idx = None
+            self._persist()
+        self.draw_annotations()
+        if dialog.result == "paste" and ann["text"]:
+            self._start_paste(ann)
+
+    # --------------------------------------------- paste note as code comment
+
+    def _start_paste(self, ann):
+        """Arm placement mode: the next line click inserts the comment."""
+        self._paste_ann = ann
+        self.status_hint.config(
+            text="Insert note as comment (opens the editor): click a line "
+                 "number to place it • Enter = line %d (region start) • "
+                 "Esc cancels" % ann["startLine"])
+
+    def _paste_default(self, _event=None):
+        if self._paste_ann:
+            self._paste_comment_at(self._paste_ann["startLine"])
+            return "break"
+
+    def _paste_comment_at(self, line_no):
+        """Insert the armed annotation's note as comment lines above
+        ``line_no`` — as a pending, undoable edit in the editor. Nothing is
+        written to disk until the user saves; annotation anchors follow the
+        inserted lines through their editor band tags."""
+        ann, self._paste_ann = self._paste_ann, None
+        rendered = comment_lines(ann["text"], self.lang_id)
+        if not rendered:
+            self.draw_annotations()
+            return
+        if not self._edit_mode:
+            self._enter_edit()
+            if not self._edit_mode:      # refused (non-UTF8, unreadable, …)
+                return
+        total = int(self.editor.index("end-1c").split(".")[0])
+        line_no = max(1, min(line_no, total))
+        target = self.editor.get("%d.0" % line_no, "%d.end" % line_no)
+        indent = target[:len(target) - len(target.lstrip(" \t"))]
+        block = "".join(indent + ln + "\n" for ln in rendered)
+        self.editor.edit_separator()     # one Ctrl+Z removes the whole block
+        self.editor.insert("%d.0" % line_no, block)
+        self.editor.edit_separator()
+        self.editor.mark_set("insert", "%d.0" % line_no)
+        self.editor.see("%d.0" % line_no)
+        self.editor.focus_set()
+        self._flash_status(
+            "Inserted %d comment line%s at line %d — Ctrl+Z undoes, "
+            "Ctrl+S saves" % (len(rendered),
+                              "s" if len(rendered) != 1 else "", line_no))
+
+    def _persist(self):
+        try:
+            save_annotations(self.sidecar_for(self.file_path),
+                             self._rel_name(self.file_path),
+                             self.annotations, prune_root=self.ann_root)
+            self._refresh_badge(self.file_path)
+        except OSError as exc:
+            from tkinter import messagebox
+            messagebox.showerror("Save failed",
+                                 "Could not write annotation file:\n%s" % exc)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Browse a project folder and view code files with "
+                    "annotations overlaid transparently. Annotations are "
+                    "kept in a parallel tree mirroring the source layout.")
+    parser.add_argument("folder", nargs="?",
+                        help="project folder to open at startup")
+    parser.add_argument("-a", "--annotations", metavar="ANN_ROOT",
+                        help="root of the annotation tree (default: "
+                             + ANN_DIR_NAME + "/ under the git repo root "
+                             "containing the folder, or under the folder "
+                             "itself when not in a git repo)")
+    args = parser.parse_args()
+
+    root = tk.Tk()
+    CodeAnnotatorApp(root, args.folder, ann_root=args.annotations)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

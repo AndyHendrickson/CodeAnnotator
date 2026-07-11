@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "file": "examples/todo_app.py",
+  "annotations": [
+    {
+      "id": "c16c3699",
+      "startLine": 7,
+      "endLine": 8,
+      "color": "blue",
+      "text": "Config: store location and priority ordering used by pending()"
+    },
+    {
+      "id": "32535331",
+      "startLine": 11,
+      "endLine": 16,
+      "color": "yellow",
+      "text": "Persistence layer \u2014 silently starts fresh if the store is missing"
+    },
+    {
+      "id": "335ea749",
+      "startLine": 24,
+      "endLine": 26,
+      "color": "orange",
+      "text": "Validates priority before mutating the list"
+    },
+    {
+      "id": "f5c5e89a",
+      "startLine": 36,
+      "endLine": 39,
+      "color": "green",
+      "text": "Core sort: priority first, then FIFO within a priority"
+    },
+    {
+      "id": "a82fba0d",
+      "startLine": 51,
+      "endLine": 52,
+      "color": "purple",
+      "text": "Entry point"
+    }
+  ]
+}

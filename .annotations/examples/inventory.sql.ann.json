@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "file": "examples/inventory.sql",
+  "annotations": [
+    {
+      "id": "730b9948",
+      "startLine": 4,
+      "endLine": 10,
+      "color": "blue",
+      "text": "Master data \u2014 SKU is the natural key, price is guarded >= 0"
+    },
+    {
+      "id": "05a06313",
+      "startLine": 15,
+      "endLine": 15,
+      "color": "orange",
+      "text": "Sign convention: negative quantity means stock leaving"
+    },
+    {
+      "id": "2facee12",
+      "startLine": 19,
+      "endLine": 26,
+      "color": "green",
+      "text": "On-hand report: SUM of signed moves, LEFT JOIN keeps unmoved products"
+    }
+  ]
+}
