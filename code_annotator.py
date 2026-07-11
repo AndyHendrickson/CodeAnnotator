@@ -414,16 +414,26 @@ def find_git_root(path):
         cur = parent
 
 
+class AnnotationLoadError(Exception):
+    """An annotation sidecar exists but could not be read or parsed."""
+
+
 def load_annotations(ann_path):
+    """Read one annotation file; [] when it doesn't exist.
+
+    Raises AnnotationLoadError when the file exists but cannot be parsed —
+    callers must not mistake a corrupt file for an empty one, or a later
+    save would overwrite it and destroy its contents."""
     if not os.path.isfile(ann_path):
         return []
     try:
         with open(ann_path, encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, ValueError):
-        return []
+        entries = data.get("annotations", [])
+    except (OSError, ValueError, AttributeError) as exc:
+        raise AnnotationLoadError("%s: %s" % (ann_path, exc))
     result = []
-    for a in data.get("annotations", []):
+    for a in entries:
         try:
             start, end = int(a["startLine"]), int(a["endLine"])
         except (KeyError, TypeError, ValueError):
@@ -465,8 +475,12 @@ def save_annotations(ann_path, rel_name, annotations, prune_root=None):
         return
     os.makedirs(os.path.dirname(ann_path), exist_ok=True)
     data = {"version": 1, "file": rel_name, "annotations": annotations}
-    with open(ann_path, "w", encoding="utf-8") as f:
+    # write to a sibling temp file, then swap atomically — a crash mid-write
+    # can never leave a truncated annotation file behind
+    tmp = ann_path + ".tmp~"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
+    os.replace(tmp, ann_path)
 
 
 def comment_lines(text, lang_id):
@@ -641,6 +655,8 @@ class CodeAnnotatorApp:
         self._ann_idx = None           # annotation the user last jumped to
         self._paste_ann = None         # annotation being placed as a comment
         self._flash_msg = None         # transient status-bar message
+        self._flash_after = None       # pending flash-clear timer id
+        self._ann_error = False        # sidecar unparseable; saving disabled
         self.lang_id = "plain"
         self._truncated = False        # current file cut off at MAX_LINES
         self._edit_mode = False        # editor swapped in for the canvas view
@@ -974,7 +990,9 @@ class CodeAnnotatorApp:
         item = self._item_by_path.get(file_path)
         if not item:
             return
-        text = self.tree.item(item, "text").rstrip(" ●")
+        text = self.tree.item(item, "text")
+        if text.endswith(" ●"):          # exact suffix — rstrip would also
+            text = text[:-2]             # eat trailing ●/spaces in the NAME
         if os.path.isfile(self.sidecar_for(file_path)):
             text += " ●"
         self.tree.item(item, text=text)
@@ -1008,7 +1026,12 @@ class CodeAnnotatorApp:
 
         self.file_path = path
         self.lines = lines
-        self.annotations = load_annotations(self.sidecar_for(path))
+        try:
+            self.annotations = load_annotations(self.sidecar_for(path))
+            self._ann_error = False
+        except AnnotationLoadError:
+            self.annotations = []
+            self._ann_error = True
         self._pending = None
         self._drag_start = None
         self._sel = None
@@ -1030,6 +1053,10 @@ class CodeAnnotatorApp:
         lang_note = "" if lang_id == "plain" else "  •  " + lang_id.upper()
         trunc_note = ("  •  showing first %d lines" % MAX_LINES) if truncated else ""
         self.status_file.config(text=name + lang_note + trunc_note)
+        if self._ann_error:
+            self._flash_status("Annotation file is unreadable — annotating "
+                               "is disabled for this file until it is fixed "
+                               "or deleted", ms=8000)
 
     def _show_message(self, msg):
         self.file_path = None
@@ -1041,6 +1068,7 @@ class CodeAnnotatorApp:
         self._matches, self._match_idx = [], -1
         self._ann_idx = None
         self._paste_ann = None
+        self._ann_error = False
         self.canvas.delete("all")
         self.gutter.delete("all")
         self.canvas.create_text(
@@ -1134,10 +1162,12 @@ class CodeAnnotatorApp:
                 if a["text"]:
                     self._draw_note(a, y0, tag, alpha)
             # highlight bands sit under the code so text stays crisp;
-            # note text stays on top
-            canvas.tag_lower("ann", "code")
+            # note text stays on top (tag_lower/raise error out when the
+            # reference tag matches nothing, e.g. a file of blank lines)
+            if canvas.find_withtag("code"):
+                canvas.tag_lower("ann", "code")
             canvas.tag_raise("note")
-            if canvas.find_withtag("find"):
+            if canvas.find_withtag("find") and canvas.find_withtag("ann"):
                 canvas.tag_raise("find", "ann")   # search hits over the bands
 
         if self._pending:
@@ -1147,7 +1177,8 @@ class CodeAnnotatorApp:
             canvas.create_rectangle(0, y0, self.content_width, y1,
                                     fill=blend(BG, (14, 99, 156), 0.35),
                                     outline="", tags="pending")
-            canvas.tag_lower("pending", "code")
+            if canvas.find_withtag("code"):
+                canvas.tag_lower("pending", "code")
 
         count = len(self.annotations)
         hint = ("Click or drag on line numbers to annotate • "
@@ -1412,9 +1443,12 @@ class CodeAnnotatorApp:
         """Show a status-bar message that survives redraws for a few seconds."""
         self._flash_msg = text
         self.status_hint.config(text=text)
-        self.root.after(ms, self._clear_flash)
+        if self._flash_after is not None:   # an older timer would clear the
+            self.root.after_cancel(self._flash_after)   # new message early
+        self._flash_after = self.root.after(ms, self._clear_flash)
 
     def _clear_flash(self):
+        self._flash_after = None
         self._flash_msg = None
         if self._edit_mode:
             self._set_edit_hint()
@@ -1575,10 +1609,18 @@ class CodeAnnotatorApp:
         text = self.editor.get("1.0", "end-1c")
         if self._e_newline != "\n":
             text = text.replace("\n", self._e_newline)
+        # atomic save: opening the target with "wb" would truncate it before
+        # writing, so a crash mid-save could destroy the source file
+        tmp = self.file_path + ".tmp~"
         try:
-            with open(self.file_path, "wb") as f:
+            with open(tmp, "wb") as f:
                 f.write(text.encode("utf-8"))
+            os.replace(tmp, self.file_path)
         except OSError as exc:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
             from tkinter import messagebox
             messagebox.showerror("Save failed",
                                  "Could not write the source file:\n%s" % exc)
@@ -1746,6 +1788,10 @@ class CodeAnnotatorApp:
         if self._paste_ann:
             self._paste_comment_at(self._gutter_line(event))
             return
+        if self._ann_error:
+            self._flash_status("Annotating is disabled — this file's "
+                               "annotation file could not be parsed")
+            return
         self._drag_start = self._gutter_line(event)
         self._pending = (self._drag_start, self._drag_start)
         self.draw_annotations()
@@ -1849,6 +1895,15 @@ class CodeAnnotatorApp:
                               "s" if len(rendered) != 1 else "", line_no))
 
     def _persist(self):
+        if self._ann_error:
+            from tkinter import messagebox
+            messagebox.showerror(
+                "Annotations locked",
+                "This file's annotation file exists but could not be "
+                "parsed:\n%s\n\nSaving is disabled so its contents are not "
+                "overwritten. Fix or delete it, then reopen the file."
+                % self.sidecar_for(self.file_path))
+            return
         try:
             save_annotations(self.sidecar_for(self.file_path),
                              self._rel_name(self.file_path),

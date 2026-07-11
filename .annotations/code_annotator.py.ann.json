@@ -59,156 +59,135 @@
       "text": "Walks up to .git — decides the base that annotation paths are relative to"
     },
     {
-      "id": "0fe30a31",
-      "startLine": 420,
-      "endLine": 424,
+      "id": "14132b80",
+      "startLine": 434,
+      "endLine": 434,
       "color": "orange",
-      "text": "BUG (data loss): any parse error silently returns [] — the next save then OVERWRITES the corrupt file, erasing hand-edited annotations; surface load errors instead"
+      "text": "FIXED (was data loss): a corrupt annotation file now raises instead of loading as empty — the app then locks saving/annotating for that file so the bad content can't be silently overwritten"
     },
     {
       "id": "3f4d54d3",
-      "startLine": 435,
-      "endLine": 441,
+      "startLine": 445,
+      "endLine": 451,
       "color": "pink",
       "text": "PYTHON: annotations are plain dicts (string-keyed maps), not a class/struct — a typo'd key is only caught at runtime as a KeyError"
     },
     {
       "id": "8ce10054",
-      "startLine": 446,
-      "endLine": 469,
+      "startLine": 456,
+      "endLine": 483,
       "color": "yellow",
       "text": "Persistence: writes into the mirror tree; removing the last annotation prunes empty dirs"
     },
     {
       "id": "b14c4ef6",
-      "startLine": 525,
-      "endLine": 525,
+      "startLine": 539,
+      "endLine": 539,
       "color": "orange",
       "text": "PYTHON gotcha handled right: nm=name freezes the loop value — closures capture variables, not values, so without it every swatch would pick the LAST color"
     },
     {
       "id": "cf5a8145",
-      "startLine": 544,
-      "endLine": 544,
+      "startLine": 558,
+      "endLine": 558,
       "color": "pink",
       "text": "PYTHON hack: builds a tuple to call _save() AND return 'break' in one expression — works, but a named two-line handler would be clearer"
     },
     {
       "id": "544e6840",
-      "startLine": 607,
-      "endLine": 608,
+      "startLine": 621,
+      "endLine": 622,
       "color": "purple",
       "text": "REVIEW: ~1250-line god class, 60+ methods, many interacting mode flags (_edit_mode, _paste_ann, _dragged...) — consider extracting find/editor/annotation-store before the next big feature"
     },
     {
       "id": "6aa10a74",
-      "startLine": 747,
-      "endLine": 748,
+      "startLine": 763,
+      "endLine": 764,
       "color": "orange",
       "text": "REVIEW portability: <MouseWheel>/event.delta is Windows+mac only — Linux/X11 sends Button-4/5 instead, so wheel scrolling silently does nothing there"
     },
     {
       "id": "b9833d8d",
-      "startLine": 765,
-      "endLine": 774,
+      "startLine": 781,
+      "endLine": 790,
       "color": "purple",
       "text": "REVIEW: edit mode is a second rendering pipeline (own gutter, wheel, highlight application) — the shared tokenizer is the key reuse, but UI tweaks must be made twice"
     },
     {
-      "id": "77893f74",
-      "startLine": 977,
-      "endLine": 977,
-      "color": "orange",
-      "text": "BUG: rstrip strips a character SET, not a suffix — a filename ending in spaces or ● gets mangled; slice off the exact ' ●' suffix instead"
-    },
-    {
       "id": "48949801",
-      "startLine": 997,
-      "endLine": 998,
+      "startLine": 1015,
+      "endLine": 1016,
       "color": "yellow",
       "text": "PYTHON: `with open(...)` auto-closes the file even on error (RAII/using); errors='replace' swaps undecodable bytes for � — display-only lossiness, which is why edit mode re-reads strictly"
     },
     {
       "id": "8fc0d757",
-      "startLine": 1003,
-      "endLine": 1003,
+      "startLine": 1021,
+      "endLine": 1021,
       "color": "pink",
       "text": "PYTHON: list comprehension rebuilds every line; `or ['']` exploits truthiness (an empty list is false) to guarantee at least one line"
     },
     {
       "id": "aeabca96",
-      "startLine": 1096,
-      "endLine": 1097,
+      "startLine": 1124,
+      "endLine": 1125,
       "color": "orange",
       "text": "REVIEW: 0x0004 is the Ctrl bit of Tk's event.state bitmask (0x0001 = Shift, used in _code_release) — correct but undocumented magic numbers"
     },
     {
       "id": "284182d9",
-      "startLine": 1136,
-      "endLine": 1141,
+      "startLine": 1164,
+      "endLine": 1171,
       "color": "orange",
       "text": "Z-order trick: bands go below the code text, notes above — keeps glyphs crisp"
     },
     {
-      "id": "4608098f",
-      "startLine": 1138,
-      "endLine": 1138,
-      "color": "orange",
-      "text": "BUG (confirmed crash): if the file renders no code text (all blank lines) this raises TclError 'tagOrId \"code\" doesn’t match any items' — _draw_find/_set_selection guard with find_withtag first; this call doesn’t"
-    },
-    {
-      "id": "6493edf7",
-      "startLine": 1411,
-      "endLine": 1415,
-      "color": "orange",
-      "text": "REVIEW: each flash schedules a 4s clear but never cancels the previous timer, so an older timer wipes a newer message early — store the id and after_cancel it"
-    },
-    {
       "id": "34057bf7",
-      "startLine": 1490,
-      "endLine": 1490,
+      "startLine": 1208,
+      "endLine": 1208,
       "color": "pink",
       "text": "PYTHON: slices are 0-based and end-EXCLUSIVE — [lo-1:hi] converts the app's 1-based inclusive range; first place to look if a line-range bug ever appears"
     },
     {
-      "id": "6c0b7364",
-      "startLine": 1579,
-      "endLine": 1580,
-      "color": "orange",
-      "text": "REVIEW: mode 'wb' truncates the file BEFORE writing — a crash mid-save destroys the source; write a temp file then os.replace() for an atomic save"
+      "id": "55357497",
+      "startLine": 1612,
+      "endLine": 1618,
+      "color": "yellow",
+      "text": "FIXED (crash-safety): saves write a sibling temp file then os.replace — opening the target with 'wb' would truncate it before writing"
     },
     {
       "id": "6364f34e",
-      "startLine": 1599,
-      "endLine": 1600,
+      "startLine": 1641,
+      "endLine": 1642,
       "color": "orange",
       "text": "REVIEW: if the annotated region was deleted, the annotation keeps stale line numbers while other edits shift the file — consider flagging these as orphaned"
     },
     {
       "id": "7242661b",
-      "startLine": 1743,
-      "endLine": 1768,
+      "startLine": 1785,
+      "endLine": 1814,
       "color": "green",
       "text": "Gutter click/drag selects a line range, then release opens the annotation editor"
     },
     {
       "id": "684985cf",
-      "startLine": 1776,
-      "endLine": 1778,
+      "startLine": 1822,
+      "endLine": 1824,
       "color": "pink",
       "text": "PYTHON: next((x for x in seq if cond), default) = 'find first match or default' — the loop is implicit in the generator expression"
     },
     {
       "id": "2805f2f3",
-      "startLine": 1863,
-      "endLine": 1879,
+      "startLine": 1918,
+      "endLine": 1934,
       "color": "purple",
       "text": "CLI entry: optional folder plus -a/--annotations to relocate the annotation tree"
     },
     {
       "id": "a68da39c",
-      "startLine": 1882,
-      "endLine": 1883,
+      "startLine": 1937,
+      "endLine": 1938,
       "color": "purple",
       "text": "PYTHON: the file executes top-to-bottom on import; this guard runs main() only when launched as a program, keeping the pure functions importable and testable"
     }
