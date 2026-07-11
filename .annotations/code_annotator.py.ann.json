@@ -94,100 +94,121 @@
       "text": "PYTHON hack: builds a tuple to call _save() AND return 'break' in one expression — works, but a named two-line handler would be clearer"
     },
     {
-      "id": "544e6840",
+      "id": "4d487e16",
       "startLine": 628,
-      "endLine": 629,
+      "endLine": 630,
       "color": "purple",
-      "text": "REVIEW: ~1250-line god class, 60+ methods, many interacting mode flags (_edit_mode, _paste_ann, _dragged...) — consider extracting find/editor/annotation-store before the next big feature"
+      "text": "Workspace: the one place source-base and sidecar paths are computed — everything else asks it instead of doing path math"
     },
     {
-      "id": "6aa10a74",
-      "startLine": 770,
-      "endLine": 771,
-      "color": "orange",
-      "text": "REVIEW portability: <MouseWheel>/event.delta is Windows+mac only — Linux/X11 sends Button-4/5 instead, so wheel scrolling silently does nothing there"
+      "id": "8efc3811",
+      "startLine": 664,
+      "endLine": 665,
+      "color": "purple",
+      "text": "Folder browser pane: owns the Treeview, lazy population, and the ● annotation badges"
+    },
+    {
+      "id": "fa9d1357",
+      "startLine": 759,
+      "endLine": 761,
+      "color": "purple",
+      "text": "Find/go-to-line component: owns the overlay bars and the match list; draws its highlights onto the app's canvas"
     },
     {
       "id": "b9833d8d",
-      "startLine": 788,
-      "endLine": 797,
+      "startLine": 932,
+      "endLine": 934,
       "color": "purple",
       "text": "REVIEW: edit mode is a second rendering pipeline (own gutter, wheel, highlight application) — the shared tokenizer is the key reuse, but UI tweaks must be made twice"
     },
     {
-      "id": "48949801",
-      "startLine": 1022,
-      "endLine": 1023,
-      "color": "yellow",
-      "text": "PYTHON: `with open(...)` auto-closes the file even on error (RAII/using); errors='replace' swaps undecodable bytes for � — display-only lossiness, which is why edit mode re-reads strictly"
-    },
-    {
-      "id": "8fc0d757",
-      "startLine": 1028,
-      "endLine": 1028,
-      "color": "pink",
-      "text": "PYTHON: list comprehension rebuilds every line; `or ['']` exploits truthiness (an empty list is false) to guarantee at least one line"
-    },
-    {
-      "id": "aeabca96",
-      "startLine": 1131,
-      "endLine": 1132,
-      "color": "orange",
-      "text": "REVIEW: 0x0004 is the Ctrl bit of Tk's event.state bitmask (0x0001 = Shift, used in _code_release) — correct but undocumented magic numbers"
-    },
-    {
-      "id": "284182d9",
-      "startLine": 1176,
-      "endLine": 1183,
-      "color": "orange",
-      "text": "Z-order trick: bands go below the code text, notes above — keeps glyphs crisp"
-    },
-    {
-      "id": "34057bf7",
-      "startLine": 1220,
-      "endLine": 1220,
-      "color": "pink",
-      "text": "PYTHON: slices are 0-based and end-EXCLUSIVE — [lo-1:hi] converts the app's 1-based inclusive range; first place to look if a line-range bug ever appears"
-    },
-    {
       "id": "55357497",
-      "startLine": 1626,
-      "endLine": 1632,
+      "startLine": 1061,
+      "endLine": 1067,
       "color": "yellow",
       "text": "FIXED (crash-safety): saves write a sibling temp file then os.replace — opening the target with 'wb' would truncate it before writing"
     },
     {
       "id": "0b55dcb2",
-      "startLine": 1656,
-      "endLine": 1668,
+      "startLine": 1092,
+      "endLine": 1104,
       "color": "green",
       "text": "FIXED (was stale anchors): a fully deleted region collapses to its Tk mark's line and is flagged orphaned — dimmed band, dashed edge and a ⚠ note in the viewer; re-saving from the dialog clears the flag"
     },
     {
+      "id": "544e6840",
+      "startLine": 1257,
+      "endLine": 1258,
+      "color": "purple",
+      "text": "REFACTORED (was a ~1250-line god class): the app is now a coordinator — it owns the annotate view, dialogs and shortcuts, and wires Workspace, FileTreePane, FindController and EditorPane together"
+    },
+    {
+      "id": "6aa10a74",
+      "startLine": 1375,
+      "endLine": 1376,
+      "color": "orange",
+      "text": "REVIEW portability: <MouseWheel>/event.delta is Windows+mac only — Linux/X11 sends Button-4/5 instead, so wheel scrolling silently does nothing there"
+    },
+    {
+      "id": "48949801",
+      "startLine": 1477,
+      "endLine": 1478,
+      "color": "yellow",
+      "text": "PYTHON: `with open(...)` auto-closes the file even on error (RAII/using); errors='replace' swaps undecodable bytes for � — display-only lossiness, which is why edit mode re-reads strictly"
+    },
+    {
+      "id": "8fc0d757",
+      "startLine": 1483,
+      "endLine": 1483,
+      "color": "pink",
+      "text": "PYTHON: list comprehension rebuilds every line; `or ['']` exploits truthiness (an empty list is false) to guarantee at least one line"
+    },
+    {
+      "id": "aeabca96",
+      "startLine": 1583,
+      "endLine": 1584,
+      "color": "orange",
+      "text": "REVIEW: 0x0004 is the Ctrl bit of Tk's event.state bitmask (0x0001 = Shift, used in _code_release) — correct but undocumented magic numbers"
+    },
+    {
+      "id": "284182d9",
+      "startLine": 1628,
+      "endLine": 1635,
+      "color": "orange",
+      "text": "Z-order trick: bands go below the code text, notes above — keeps glyphs crisp"
+    },
+    {
+      "id": "34057bf7",
+      "startLine": 1672,
+      "endLine": 1672,
+      "color": "pink",
+      "text": "PYTHON: slices are 0-based and end-EXCLUSIVE — [lo-1:hi] converts the app's 1-based inclusive range; first place to look if a line-range bug ever appears"
+    },
+    {
       "id": "7242661b",
-      "startLine": 1821,
-      "endLine": 1850,
+      "startLine": 1904,
+      "endLine": 1933,
       "color": "green",
       "text": "Gutter click/drag selects a line range, then release opens the annotation editor"
     },
     {
       "id": "684985cf",
-      "startLine": 1858,
-      "endLine": 1860,
+      "startLine": 1941,
+      "endLine": 1943,
       "color": "pink",
       "text": "PYTHON: next((x for x in seq if cond), default) = 'find first match or default' — the loop is implicit in the generator expression"
     },
     {
       "id": "2805f2f3",
-      "startLine": 1955,
-      "endLine": 1971,
+      "startLine": 2036,
+      "endLine": 2052,
       "color": "purple",
       "text": "CLI entry: optional folder plus -a/--annotations to relocate the annotation tree"
     },
     {
       "id": "a68da39c",
-      "startLine": 1974,
-      "endLine": 1975,
+      "startLine": 2055,
+      "endLine": 2056,
       "color": "purple",
       "text": "PYTHON: the file executes top-to-bottom on import; this guard runs main() only when launched as a program, keeping the pure functions importable and testable"
     }
