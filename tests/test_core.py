@@ -45,12 +45,25 @@ try:
     ann_root = os.path.join(tmp, ".annotations")
     ann_path = os.path.join(ann_root, "src", "foo.py.ann.json")
     anns = [{"id": "abcd1234", "startLine": 3, "endLine": 5,
-             "color": "green", "text": "note", "orphaned": False}]
+             "color": "green", "text": "note", "orphaned": False,
+             "anchor": "x = compute()"}]
     ca.save_annotations(ann_path, "src/foo.py", anns, prune_root=ann_root)
     loaded = ca.load_annotations(ann_path)
     assert loaded == anns, loaded
     raw = open(ann_path, encoding="utf-8").read()
     assert "orphaned" not in raw, "falsy orphaned flag should not be written"
+    assert "x = compute()" in raw, "anchor should be persisted"
+
+    # reconcile: drifted anchor is re-located, missing anchor orphans
+    lines = ["pad", "pad", "pad", "x = compute()", "y = 2"]
+    moved = [dict(anns[0])]
+    repaired, lost = ca.reconcile_annotations(moved, lines)
+    assert (repaired, lost) == (1, 0)
+    assert (moved[0]["startLine"], moved[0]["endLine"]) == (4, 5)
+    gone = [dict(anns[0])]
+    repaired, lost = ca.reconcile_annotations(gone, ["a", "b"])
+    assert (repaired, lost) == (0, 1) and gone[0]["orphaned"] is True
+    assert ca.anchor_text("  x =\t compute()  ") == "x = compute()"
     assert not [f for f in os.listdir(os.path.dirname(ann_path))
                 if f.endswith(".tmp~")], "temp file left behind"
 

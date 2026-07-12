@@ -9,8 +9,9 @@ layout, so they never touch the source files themselves.
 
 ## Requirements
 
-- Python 3.4+ (only the standard library is used — tkinter ships with the
-  official Windows installer). No pip installs needed.
+- Python 3.8+ (only the standard library is used — tkinter ships with the
+  official Windows/macOS installers; on Debian/Ubuntu install `python3-tk`).
+  No pip installs needed. Runs on Windows, Linux and macOS.
 
 ## Run
 
@@ -18,7 +19,12 @@ layout, so they never touch the source files themselves.
 python code_annotator.py            # then click "Open Folder"
 python code_annotator.py C:\path\to\project   # open a folder directly
 python code_annotator.py C:\path\to\project -a D:\notes\project-anns
+python code_annotator.py C:\path\to\project --check        # validate annotations (no GUI)
+python code_annotator.py C:\path\to\project --check --fix  # and repair drifted ones
 ```
+
+The window geometry, zoom level, opacity, color filter, and last opened
+folder are remembered between runs (in `~/.code_annotator.json`).
 
 `-a/--annotations ANN_ROOT` sets the root of the annotation tree. When
 omitted, it defaults to `.annotations/` under the **git repository root**
@@ -30,7 +36,11 @@ a git repo. The active annotation root is shown in the toolbar.
 
 - **Browse** — the left pane shows the project tree (lazily loaded;
   `node_modules`, `.git`, build output, etc. are skipped). Files that have
-  annotations show a `●` badge.
+  annotations show a `●` badge. Below the tree, an **outline** lists every
+  annotation in the open file — click one to jump to it.
+- **Filter** — the toolbar color dots toggle each annotation color on and
+  off (display only; nothing is written), so you can e.g. show only the
+  orange gotchas.
 - **View** — select a code file to render it with syntax colorization
   (Python, JS/TS, C/C++, C#, Java, Go, Rust, SQL, shell/PowerShell, HTML/XML,
   CSS, JSON, and more).
@@ -49,15 +59,16 @@ a git repo. The active annotation root is shown in the toolbar.
   their saved line positions are updated on save. If an annotated region is
   deleted entirely, its annotation collapses to the deletion point and is
   marked *orphaned* (`⚠`, dimmed, dashed edge) rather than keeping stale line
-  numbers. Editing requires the file to be valid UTF-8; its newline style is
-  preserved.
+  numbers. `Ctrl+F` searches within the editor. If the file changed on disk
+  while you were editing, saving asks before overwriting. Editing requires
+  the file to be valid UTF-8; its newline style is preserved.
 - **Annotate** — click or drag on the **line numbers** to pick a line range,
   then write a note and choose a highlight color. The annotation appears as a
   translucent color band over those lines with the note text floating at the
   right edge, word-wrapped (line breaks preserved) to stay clear of the code;
   notes re-wrap when the window is resized or scrolled horizontally.
 - **Edit** — click an existing highlight band (or its note) to edit or delete
-  it.
+  it. Deleting flashes an undo window: `Ctrl+Z` restores the annotation.
 - **Insert as comment** — in the edit dialog, *Insert into code as comment…*
   places the note as comment lines in the file's own comment syntax, indented
   to match. Click a line number (or a code line) to place it, or press
@@ -105,6 +116,15 @@ Each annotation file is plain JSON:
   was deleted during an editing session: the annotation collapses to the
   deletion point and is shown dimmed with a dashed edge and a `⚠ orphaned`
   note prefix. Re-saving the annotation from its edit dialog clears the flag.
+- `anchor` (optional) is a whitespace-collapsed copy of the first annotated
+  line, maintained automatically. It makes annotations **self-healing**:
+  when a file is changed outside the app (another editor, `git pull`, an
+  LLM), the app re-locates each annotation by its anchor on open — moved
+  code is followed, deleted code orphans the annotation. `--check` reports
+  drift from the command line and `--check --fix` repairs whole trees.
+- Annotations are also live-reloaded while a file is open: if another tool
+  rewrites the sidecar (e.g. an LLM annotating in the background), the view
+  updates within a couple of seconds.
 - Files and mirrored directories are created on first save; when the last
   annotation on a file is removed, its file is deleted and empty directories
   are pruned.

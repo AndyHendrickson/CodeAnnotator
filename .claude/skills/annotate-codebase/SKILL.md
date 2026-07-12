@@ -41,6 +41,10 @@ bands over the code. Never modify the source files themselves.
   `1 <= startLine <= endLine <= line count of the file`.
 - `color`: one of `yellow`, `green`, `blue`, `pink`, `purple`, `orange`.
 - `text`: single line shown floating over the code (newlines are flattened).
+- `anchor` (optional but recommended): the text of the first annotated line
+  with all whitespace runs collapsed to single spaces. The app uses it to
+  re-locate the annotation automatically if the file changes later, and
+  `code_annotator.py --check` uses it to detect drift.
 - Sort annotations by `startLine`. Overlaps are allowed but hard to read —
   prefer non-overlapping ranges.
 

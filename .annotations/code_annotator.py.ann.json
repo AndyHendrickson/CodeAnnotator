@@ -7,210 +7,256 @@
       "startLine": 2,
       "endLine": 22,
       "color": "blue",
-      "text": "Module doc: parallel-tree storage layout and the .ann.json schema"
+      "text": "Module doc: parallel-tree storage layout and the .ann.json schema",
+      "anchor": "\"\"\"Code Annotator — browse a project folder, view code files with syntax"
     },
     {
       "id": "20cf1270",
       "startLine": 34,
       "endLine": 42,
       "color": "blue",
-      "text": "Tuning knobs: size/line caps, tab width, and directories hidden from the tree"
+      "text": "Tuning knobs: size/line caps, tab width, and directories hidden from the tree",
+      "anchor": ""
     },
     {
       "id": "68ce74ee",
       "startLine": 65,
       "endLine": 71,
       "color": "blue",
-      "text": "Annotation palette — blend() derives all translucent shades from these six"
+      "text": "Annotation palette — blend() derives all translucent shades from these six",
+      "anchor": "\"num\": \"#b5cea8\","
     },
     {
       "id": "f08799b3",
       "startLine": 190,
       "endLine": 207,
       "color": "blue",
-      "text": "Extension → tokenizer config; unknown extensions fall back to plain text"
+      "text": "Extension → tokenizer config; unknown extensions fall back to plain text",
+      "anchor": "\"rust\": _lang(\"rust\", line=\"//\", block=(\"/*\", \"*/\")),"
     },
     {
       "id": "453b84b8",
       "startLine": 223,
       "endLine": 225,
       "color": "green",
-      "text": "Core tokenizer: one pass per line; st carries block-comment/string state between lines"
+      "text": "Core tokenizer: one pass per line; st carries block-comment/string state between lines",
+      "anchor": "if lower in (\"dockerfile\", \"makefile\"):"
     },
     {
       "id": "1db7198a",
       "startLine": 381,
       "endLine": 389,
       "color": "green",
-      "text": "A single shared state dict threads multi-line comments and strings across the file"
+      "text": "A single shared state dict threads multi-line comments and strings across the file",
+      "anchor": "i, st[\"mode\"] = k, \"tag\""
     },
     {
       "id": "8566a90e",
       "startLine": 394,
       "endLine": 402,
       "color": "orange",
-      "text": "The transparency illusion: overlay colors are pre-blended against the editor background"
+      "text": "The transparency illusion: overlay colors are pre-blended against the editor background",
+      "anchor": "st = {\"mode\": None, \"delim\": \"\"}"
     },
     {
       "id": "8f3caf5d",
       "startLine": 405,
       "endLine": 414,
       "color": "pink",
-      "text": "Walks up to .git — decides the base that annotation paths are relative to"
-    },
-    {
-      "id": "14132b80",
-      "startLine": 434,
-      "endLine": 434,
-      "color": "orange",
-      "text": "FIXED (was data loss): a corrupt annotation file now raises instead of loading as empty — the app then locks saving/annotating for that file so the bad content can't be silently overwritten"
-    },
-    {
-      "id": "3f4d54d3",
-      "startLine": 445,
-      "endLine": 452,
-      "color": "pink",
-      "text": "PYTHON: annotations are plain dicts (string-keyed maps), not a class/struct — a typo'd key is only caught at runtime as a KeyError"
-    },
-    {
-      "id": "8ce10054",
-      "startLine": 457,
-      "endLine": 490,
-      "color": "yellow",
-      "text": "Persistence: writes into the mirror tree; removing the last annotation prunes empty dirs"
-    },
-    {
-      "id": "b14c4ef6",
-      "startLine": 546,
-      "endLine": 546,
-      "color": "orange",
-      "text": "PYTHON gotcha handled right: nm=name freezes the loop value — closures capture variables, not values, so without it every swatch would pick the LAST color"
-    },
-    {
-      "id": "cf5a8145",
-      "startLine": 565,
-      "endLine": 565,
-      "color": "pink",
-      "text": "PYTHON hack: builds a tuple to call _save() AND return 'break' in one expression — works, but a named two-line handler would be clearer"
-    },
-    {
-      "id": "4d487e16",
-      "startLine": 628,
-      "endLine": 630,
-      "color": "purple",
-      "text": "Workspace: the one place source-base and sidecar paths are computed — everything else asks it instead of doing path math"
-    },
-    {
-      "id": "8efc3811",
-      "startLine": 664,
-      "endLine": 665,
-      "color": "purple",
-      "text": "Folder browser pane: owns the Treeview, lazy population, and the ● annotation badges"
-    },
-    {
-      "id": "fa9d1357",
-      "startLine": 759,
-      "endLine": 761,
-      "color": "purple",
-      "text": "Find/go-to-line component: owns the overlay bars and the match list; draws its highlights onto the app's canvas"
-    },
-    {
-      "id": "b9833d8d",
-      "startLine": 932,
-      "endLine": 934,
-      "color": "purple",
-      "text": "REVIEW: edit mode is a second rendering pipeline (own gutter, wheel, highlight application) — the shared tokenizer is the key reuse, but UI tweaks must be made twice"
-    },
-    {
-      "id": "55357497",
-      "startLine": 1061,
-      "endLine": 1067,
-      "color": "yellow",
-      "text": "FIXED (crash-safety): saves write a sibling temp file then os.replace — opening the target with 'wb' would truncate it before writing"
-    },
-    {
-      "id": "0b55dcb2",
-      "startLine": 1092,
-      "endLine": 1104,
-      "color": "green",
-      "text": "FIXED (was stale anchors): a fully deleted region collapses to its Tk mark's line and is flagged orphaned — dimmed band, dashed edge and a ⚠ note in the viewer; re-saving from the dialog clears the flag"
-    },
-    {
-      "id": "544e6840",
-      "startLine": 1257,
-      "endLine": 1258,
-      "color": "purple",
-      "text": "REFACTORED (was a ~1250-line god class): the app is now a coordinator — it owns the annotate view, dialogs and shortcuts, and wires Workspace, FileTreePane, FindController and EditorPane together"
+      "text": "Walks up to .git — decides the base that annotation paths are relative to",
+      "anchor": "\"\"\"Alpha-blend an RGB tuple over a hex background color.\"\"\""
     },
     {
       "id": "6aa10a74",
-      "startLine": 1375,
-      "endLine": 1376,
+      "startLine": 423,
+      "endLine": 426,
+      "color": "green",
+      "text": "FIXED (was Windows-only): wheel input is normalized here — <MouseWheel>/delta on Windows+mac, Button-4/5 on X11 — and UI/code fonts are picked per platform at startup",
+      "anchor": "def wheel_steps(event):"
+    },
+    {
+      "id": "14132b80",
+      "startLine": 476,
+      "endLine": 476,
       "color": "orange",
-      "text": "REVIEW portability: <MouseWheel>/event.delta is Windows+mac only — Linux/X11 sends Button-4/5 instead, so wheel scrolling silently does nothing there"
+      "text": "FIXED (was data loss): a corrupt annotation file now raises instead of loading as empty — the app then locks saving/annotating for that file so the bad content can't be silently overwritten",
+      "anchor": "raise AnnotationLoadError(\"%s: %s\" % (ann_path, exc))"
+    },
+    {
+      "id": "3f4d54d3",
+      "startLine": 487,
+      "endLine": 495,
+      "color": "pink",
+      "text": "PYTHON: annotations are plain dicts (string-keyed maps), not a class/struct — a typo'd key is only caught at runtime as a KeyError",
+      "anchor": "result.append({"
+    },
+    {
+      "id": "8ce10054",
+      "startLine": 500,
+      "endLine": 535,
+      "color": "yellow",
+      "text": "Persistence: writes into the mirror tree; removing the last annotation prunes empty dirs",
+      "anchor": "def save_annotations(ann_path, rel_name, annotations, prune_root=None):"
+    },
+    {
+      "id": "b14d1eda",
+      "startLine": 538,
+      "endLine": 547,
+      "color": "green",
+      "text": "Self-healing: annotations carry a whitespace-collapsed 'anchor' of their first line; on open, drifted ones follow their anchor to its new line and vanished anchors mark the annotation orphaned",
+      "anchor": "def reconcile_annotations(annotations, lines):"
     },
     {
       "id": "48949801",
-      "startLine": 1477,
-      "endLine": 1478,
+      "startLine": 579,
+      "endLine": 580,
       "color": "yellow",
-      "text": "PYTHON: `with open(...)` auto-closes the file even on error (RAII/using); errors='replace' swaps undecodable bytes for � — display-only lossiness, which is why edit mode re-reads strictly"
+      "text": "PYTHON: `with open(...)` auto-closes the file even on error (RAII/using); errors='replace' swaps undecodable bytes for � — display-only lossiness, which is why edit mode re-reads strictly",
+      "anchor": "with open(path, encoding=\"utf-8\", errors=\"replace\") as f:"
+    },
+    {
+      "id": "eb100216",
+      "startLine": 583,
+      "endLine": 587,
+      "color": "purple",
+      "text": "CLI mode (--check/--fix): validates every sidecar against its source — parse errors, missing sources, out-of-range lines, drifted anchors — and can repair in bulk; exits nonzero for CI",
+      "anchor": "def check_annotations(folder, fix=False, ann_root=None, out=print):"
+    },
+    {
+      "id": "b14c4ef6",
+      "startLine": 706,
+      "endLine": 706,
+      "color": "orange",
+      "text": "PYTHON gotcha handled right: nm=name freezes the loop value — closures capture variables, not values, so without it every swatch would pick the LAST color",
+      "anchor": "c.bind(\"<Button-1>\", lambda e, nm=name: self._pick(nm))"
+    },
+    {
+      "id": "cf5a8145",
+      "startLine": 725,
+      "endLine": 725,
+      "color": "pink",
+      "text": "PYTHON hack: builds a tuple to call _save() AND return 'break' in one expression — works, but a named two-line handler would be clearer",
+      "anchor": "self.text.bind(\"<Control-Return>\", lambda e: (self._save(), \"break\")[1])"
+    },
+    {
+      "id": "4d487e16",
+      "startLine": 788,
+      "endLine": 790,
+      "color": "purple",
+      "text": "Workspace: the one place source-base and sidecar paths are computed — everything else asks it instead of doing path math",
+      "anchor": "class Workspace:"
+    },
+    {
+      "id": "8efc3811",
+      "startLine": 824,
+      "endLine": 825,
+      "color": "purple",
+      "text": "Folder browser pane: owns the Treeview, lazy population, and the ● annotation badges",
+      "anchor": "class FileTreePane:"
+    },
+    {
+      "id": "fa9d1357",
+      "startLine": 949,
+      "endLine": 951,
+      "color": "purple",
+      "text": "Find/go-to-line component: owns the overlay bars and the match list; draws its highlights onto the app's canvas",
+      "anchor": "class FindController:"
+    },
+    {
+      "id": "b9833d8d",
+      "startLine": 1122,
+      "endLine": 1124,
+      "color": "purple",
+      "text": "REVIEW: edit mode is a second rendering pipeline (own gutter, wheel, highlight application) — the shared tokenizer is the key reuse, but UI tweaks must be made twice",
+      "anchor": "class EditorPane:"
+    },
+    {
+      "id": "55357497",
+      "startLine": 1300,
+      "endLine": 1306,
+      "color": "yellow",
+      "text": "FIXED (crash-safety): saves write a sibling temp file then os.replace — opening the target with 'wb' would truncate it before writing",
+      "anchor": "# atomic save: opening the target with \"wb\" would truncate it before"
+    },
+    {
+      "id": "0b55dcb2",
+      "startLine": 1335,
+      "endLine": 1347,
+      "color": "green",
+      "text": "FIXED (was stale anchors): a fully deleted region collapses to its Tk mark's line and is flagged orphaned — dimmed band, dashed edge and a ⚠ note in the viewer; re-saving from the dialog clears the flag",
+      "anchor": "# the whole annotated region was deleted — collapse the"
+    },
+    {
+      "id": "544e6840",
+      "startLine": 1578,
+      "endLine": 1579,
+      "color": "purple",
+      "text": "REFACTORED (was a ~1250-line god class): the app is now a coordinator — it owns the annotate view, dialogs and shortcuts, and wires Workspace, FileTreePane, FindController and EditorPane together",
+      "anchor": "class CodeAnnotatorApp:"
     },
     {
       "id": "8fc0d757",
-      "startLine": 1483,
-      "endLine": 1483,
+      "startLine": 1875,
+      "endLine": 1875,
       "color": "pink",
-      "text": "PYTHON: list comprehension rebuilds every line; `or ['']` exploits truthiness (an empty list is false) to guarantee at least one line"
+      "text": "PYTHON: list comprehension rebuilds every line; `or ['']` exploits truthiness (an empty list is false) to guarantee at least one line",
+      "anchor": "lines = [ln.expandtabs(TAB_WIDTH) for ln in text.splitlines()] or [\"\"]"
     },
     {
       "id": "aeabca96",
-      "startLine": 1583,
-      "endLine": 1584,
+      "startLine": 2004,
+      "endLine": 2005,
       "color": "orange",
-      "text": "REVIEW: 0x0004 is the Ctrl bit of Tk's event.state bitmask (0x0001 = Shift, used in _code_release) — correct but undocumented magic numbers"
+      "text": "REVIEW: 0x0004 is the Ctrl bit of Tk's event.state bitmask (0x0001 = Shift, used in _code_release) — correct but undocumented magic numbers",
+      "anchor": "if event.state & 0x0004: # Ctrl held — zoom instead of scroll"
     },
     {
       "id": "284182d9",
-      "startLine": 1628,
-      "endLine": 1635,
+      "startLine": 2050,
+      "endLine": 2057,
       "color": "orange",
-      "text": "Z-order trick: bands go below the code text, notes above — keeps glyphs crisp"
+      "text": "Z-order trick: bands go below the code text, notes above — keeps glyphs crisp",
+      "anchor": "# highlight bands sit under the code so text stays crisp;"
     },
     {
       "id": "34057bf7",
-      "startLine": 1672,
-      "endLine": 1672,
+      "startLine": 2094,
+      "endLine": 2094,
       "color": "pink",
-      "text": "PYTHON: slices are 0-based and end-EXCLUSIVE — [lo-1:hi] converts the app's 1-based inclusive range; first place to look if a line-range bug ever appears"
+      "text": "PYTHON: slices are 0-based and end-EXCLUSIVE — [lo-1:hi] converts the app's 1-based inclusive range; first place to look if a line-range bug ever appears",
+      "anchor": "cols = max(self._line_cols[lo - 1:hi] or [0])"
     },
     {
       "id": "7242661b",
-      "startLine": 1904,
-      "endLine": 1933,
+      "startLine": 2350,
+      "endLine": 2380,
       "color": "green",
-      "text": "Gutter click/drag selects a line range, then release opens the annotation editor"
+      "text": "Gutter click/drag selects a line range, then release opens the annotation editor",
+      "anchor": "def _gutter_press(self, event):"
     },
     {
       "id": "684985cf",
-      "startLine": 1941,
-      "endLine": 1943,
+      "startLine": 2388,
+      "endLine": 2390,
       "color": "pink",
-      "text": "PYTHON: next((x for x in seq if cond), default) = 'find first match or default' — the loop is implicit in the generator expression"
+      "text": "PYTHON: next((x for x in seq if cond), default) = 'find first match or default' — the loop is implicit in the generator expression",
+      "anchor": "ann_id = next((t.split(\"_\", 1)[1] for t in self.canvas.gettags(items[0])"
     },
     {
       "id": "2805f2f3",
-      "startLine": 2036,
-      "endLine": 2052,
+      "startLine": 2544,
+      "endLine": 2573,
       "color": "purple",
-      "text": "CLI entry: optional folder plus -a/--annotations to relocate the annotation tree"
+      "text": "CLI entry: optional folder plus -a/--annotations to relocate the annotation tree",
+      "anchor": "def main():"
     },
     {
       "id": "a68da39c",
-      "startLine": 2055,
-      "endLine": 2056,
+      "startLine": 2576,
+      "endLine": 2577,
       "color": "purple",
-      "text": "PYTHON: the file executes top-to-bottom on import; this guard runs main() only when launched as a program, keeping the pure functions importable and testable"
+      "text": "PYTHON: the file executes top-to-bottom on import; this guard runs main() only when launched as a program, keeping the pure functions importable and testable",
+      "anchor": "if __name__ == \"__main__\":"
     }
   ]
 }
