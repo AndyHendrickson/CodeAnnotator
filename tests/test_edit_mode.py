@@ -33,7 +33,7 @@ root.update()
 app.edit.toggle()
 root.update()
 assert app.edit.active
-assert app.edit.frame.winfo_ismapped() and not app.code_frame.winfo_ismapped()
+assert app.edit.frame.winfo_ismapped() and not app.viewer.code_frame.winfo_ismapped()
 assert app.edit.editor.get("1.0", "end-1c") == body
 assert app.edit_btn.cget("text").endswith("Done")
 assert not app.edit.dirty
@@ -81,7 +81,7 @@ print("save + annotation re-anchor OK")
 app.edit.toggle()
 root.update()
 assert not app.edit.active
-assert app.code_frame.winfo_ismapped() and not app.edit.frame.winfo_ismapped()
+assert app.viewer.code_frame.winfo_ismapped() and not app.edit.frame.winfo_ismapped()
 assert app.lines[1] == "VERSION = 3"
 assert app.annotations[0]["startLine"] == 6
 print("exit edit mode OK")

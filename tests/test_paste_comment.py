@@ -72,7 +72,7 @@ print("save + annotation re-anchor OK")
 before = open(src, encoding="utf-8").read()
 app._start_paste(app.annotations[0])
 class Ev: y = app.pad + 2                     # a point inside line 1
-app._gutter_press(Ev); root.update()
+app.viewer._gutter_press(Ev); root.update()
 assert app.edit.active
 assert app.edit.editor.get("1.0", "2.0").startswith("# adds the parts")
 import tkinter.messagebox as mb

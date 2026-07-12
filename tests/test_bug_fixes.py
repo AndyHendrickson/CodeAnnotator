@@ -41,10 +41,10 @@ root.update()
 
 # 1) crash fix: annotated all-blank file opens; z-order raise with find active
 app.open_file(blank); root.update()
-assert app.annotations and app.canvas.find_withtag("ann")
+assert app.annotations and app.viewer.canvas.find_withtag("ann")
 app.open_file(plain); root.update()          # no annotations at all
 app.finder.open_find(); app.finder.find_entry.insert(0, "a"); app.finder.refresh()
-app.draw_annotations()                       # used to tag_raise over empty 'ann'
+app.viewer.draw_annotations()                       # used to tag_raise over empty 'ann'
 app._close_bars()
 print("1) blank-file + empty-ann z-order crash fixed")
 
@@ -67,8 +67,8 @@ assert errors, "persist did not refuse"
 assert open(corrupt_sc, encoding="utf-8").read() == "{ this is not json !!", \
     "corrupt sidecar was overwritten"
 class Ev: y = 10
-app._gutter_press(Ev)                        # annotating blocked with a flash
-assert app._drag_start is None and "disabled" in app.status_hint.cget("text")
+app.viewer._gutter_press(Ev)                        # annotating blocked with a flash
+assert app.viewer._drag_start is None and "disabled" in app.status_hint.cget("text")
 print("2) corrupt sidecar preserved; saving and annotating locked")
 
 # 3) rstrip badge fix: filename ending in ' ●' survives refresh

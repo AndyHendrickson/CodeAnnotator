@@ -1023,7 +1023,7 @@ class FindController:
         self.goto_bar.place_forget()
         self.reset()
         self._last_query = ""
-        self.app.canvas.delete("find")
+        self.app.viewer.canvas.delete("find")
 
     def reset(self):
         self.matches, self.match_idx = [], -1
@@ -1043,7 +1043,7 @@ class FindController:
         query = self.find_entry.get()
         self._last_query = query
         self.reset()
-        app.canvas.delete("find")
+        app.viewer.canvas.delete("find")
         if query and app.file_path:
             q = query.lower()
             for row, line in enumerate(app.lines):
@@ -1063,7 +1063,7 @@ class FindController:
 
     def draw(self):
         app = self.app
-        canvas = app.canvas
+        canvas = app.viewer.canvas
         canvas.delete("find")
         for idx, (ln, col, length) in enumerate(self.matches):
             x0 = app.pad + col * app.char_w
@@ -1086,13 +1086,14 @@ class FindController:
         self.match_idx = idx % len(self.matches)
         self.draw()
         ln, col, _length = self.matches[self.match_idx]
-        app._scroll_to_line(ln)
+        viewer = app.viewer
+        viewer.scroll_to_line(ln)
         x0 = app.pad + col * app.char_w
-        left = app.canvas.canvasx(0)
-        view_w = app.canvas.winfo_width()
+        left = viewer.canvas.canvasx(0)
+        view_w = viewer.canvas.winfo_width()
         if not (left <= x0 <= left + view_w - 80):
-            app.canvas.xview_moveto(
-                max(0.0, (x0 - view_w / 3.0) / max(1, app.content_width)))
+            viewer.canvas.xview_moveto(
+                max(0.0, (x0 - view_w / 3.0) / max(1, viewer.content_width)))
         self.find_count.config(text="%d of %d" % (self.match_idx + 1,
                                                   len(self.matches)))
         return "break"
@@ -1111,9 +1112,9 @@ class FindController:
             return "break"
         ln = max(1, min(len(app.lines), ln))
         self.goto_bar.place_forget()
-        app._scroll_to_line(ln)
-        app._set_selection((ln, ln))
-        app.canvas.focus_set()
+        app.viewer.scroll_to_line(ln)
+        app.viewer.set_selection((ln, ln))
+        app.viewer.canvas.focus_set()
         return "break"
 
 
@@ -1240,8 +1241,7 @@ class EditorPane:
         self._line_tokens = []
         self.active = True
 
-        app.gutter.pack_forget()
-        app.code_frame.pack_forget()
+        app.viewer.hide()
         self.frame.pack(fill="both", expand=True)
         app.edit_btn.config(text="✓ Done")
         app.save_btn.pack(side="left", padx=(0, 4), pady=5,
@@ -1272,8 +1272,7 @@ class EditorPane:
         self.active = False
         self.dirty = False
         self.frame.pack_forget()
-        app.gutter.pack(side="left", fill="y")
-        app.code_frame.pack(side="left", fill="both", expand=True)
+        app.viewer.show()
         app.edit_btn.config(text="✎ Edit")
         app.save_btn.pack_forget()
         app.open_file(app.file_path)     # re-render the (possibly new) source
@@ -1573,6 +1572,472 @@ class EditorPane:
         self._line_tokens = tokenized
 
 
+# ------------------------------------------------------------- annotate view
+
+class ViewerPane:
+    """The annotate view: syntax-colored code rendered on a canvas, the
+    line-number gutter, translucent annotation bands with word-wrapped
+    notes, line selection/copy, and the gutter's annotate gestures."""
+
+    def __init__(self, app, view):
+        self.app = app
+        self.content_width = 0
+        self._tokenized = []           # cached tokens so zoom can re-render
+        self._line_cols = []           # per-line code width, in columns
+        self._sel = None               # selected line range (lo, hi)
+        self._sel_anchor = None        # code-area drag anchor line
+        self._dragged = False          # True once a code-area drag moves
+        self._drag_start = None        # gutter drag anchor line
+        self._pending = None           # (lo, hi) line range being selected
+
+        self.gutter = tk.Canvas(view, width=56, bg=BG, highlightthickness=0,
+                                cursor="hand2")
+        self.gutter.pack(side="left", fill="y")
+        self.gutter.bind("<Button-1>", self._gutter_press)
+        self.gutter.bind("<B1-Motion>", self._gutter_drag)
+        self.gutter.bind("<ButtonRelease-1>", self._gutter_release)
+
+        self.code_frame = tk.Frame(view, bg=BG)
+        self.code_frame.pack(side="left", fill="both", expand=True)
+        self.canvas = tk.Canvas(self.code_frame, bg=BG, highlightthickness=0)
+        vbar = ttk.Scrollbar(self.code_frame, orient="vertical",
+                             command=self.yview)
+        self.hbar = ttk.Scrollbar(self.code_frame, orient="horizontal",
+                                  command=self.canvas.xview)
+        self.canvas.configure(yscrollcommand=vbar.set,
+                              xscrollcommand=self._on_xscroll)
+        vbar.pack(side="right", fill="y")
+        self.hbar.pack(side="bottom", fill="x")
+        self.canvas.pack(side="left", fill="both", expand=True)
+
+        for widget in (self.canvas, self.gutter):
+            bind_mousewheel(widget, self._on_wheel)
+            widget.bind("<Up>", lambda e: self._scroll_lines(-1))
+            widget.bind("<Down>", lambda e: self._scroll_lines(1))
+            widget.bind("<Prior>", lambda e: self._scroll_pages(-1))
+            widget.bind("<Next>", lambda e: self._scroll_pages(1))
+            widget.bind("<Home>", lambda e: self._scroll_home_end(0))
+            widget.bind("<End>", lambda e: self._scroll_home_end(1))
+            widget.bind("<Alt-Up>", lambda e: app._goto_annotation(-1))
+            widget.bind("<Alt-Down>", lambda e: app._goto_annotation(1))
+        self.canvas.bind("<Configure>", lambda e: self.draw_annotations())
+        self.canvas.tag_bind("ann", "<ButtonRelease-1>", self._on_ann_click)
+        self.canvas.bind("<Button-1>", self._code_press)
+        self.canvas.bind("<B1-Motion>", self._code_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._code_release)
+
+    # -------------------------------------------------------------- lifecycle
+
+    def hide(self):
+        """Swap out for the editor pane."""
+        self.gutter.pack_forget()
+        self.code_frame.pack_forget()
+
+    def show(self):
+        self.gutter.pack(side="left", fill="y")
+        self.code_frame.pack(side="left", fill="both", expand=True)
+
+    def reset_interaction(self):
+        self._pending = None
+        self._drag_start = None
+        self._sel = None
+        self._sel_anchor = None
+
+    def clear(self, msg=None):
+        """Empty the view, optionally leaving a centered message."""
+        self._tokenized = []
+        self._line_cols = []
+        self.reset_interaction()
+        self.canvas.delete("all")
+        self.gutter.delete("all")
+        if msg:
+            self.canvas.create_text(
+                max(360, self.canvas.winfo_width() // 2), 120,
+                fill=FG_DIM, font=(UI_FONT, 11), text=msg)
+
+    def show_welcome(self):
+        self.canvas.delete("all")
+        cx = max(360, self.canvas.winfo_width() // 2)
+        self.canvas.create_text(
+            cx, 120, fill=FG, font=(UI_FONT, 20), tags="welcome",
+            text="Code Annotator")
+        self.canvas.create_text(
+            cx, 190, fill=FG_DIM, font=(UI_FONT, 11), justify="center",
+            tags="welcome",
+            text="Open a project folder, pick a code file, and see its\n"
+                 "annotations overlaid transparently on the source.\n\n"
+                 "Click or drag on the line numbers to add an annotation.\n"
+                 "Click an existing highlight to edit it.\n\n"
+                 "Ctrl+F finds text, Ctrl+G jumps to a line, Ctrl+C copies\n"
+                 "selected lines, Ctrl+wheel or Ctrl+=/- zooms the code,\n"
+                 "Alt+Down/Alt+Up jump to the next/previous annotation.\n\n"
+                 "Notes are saved in a parallel tree that mirrors the\n"
+                 "source layout (default: <project>/" + ANN_DIR_NAME + "),\n"
+                 "so the source files themselves are never touched.")
+
+    # -------------------------------------------------------------- rendering
+
+    def render(self, tokenized):
+        """Draw a freshly tokenized file (also cached for zoom re-renders)."""
+        self._tokenized = tokenized
+        self.reset_interaction()
+        self._render_code(tokenized)
+
+    def on_zoom(self):
+        app = self.app
+        if not app.file_path:
+            return
+        first = self.canvas.yview()[0]
+        self._render_code(self._tokenized)
+        self.draw_annotations()
+        app.finder.draw()
+        self.set_selection(self._sel)
+        self.yview("moveto", first)
+
+    def _render_code(self, tokenized):
+        app = self.app
+        canvas, lh = self.canvas, app.line_h
+        canvas.delete("all")
+        self.gutter.delete("all")
+
+        max_cols = 0
+        self._line_cols = []
+        for row, tokens in enumerate(tokenized):
+            y = app.pad + row * lh
+            for col, run, cls in tokens:
+                if not run.strip() and cls is None:
+                    continue
+                canvas.create_text(app.pad + col * app.char_w, y,
+                                   anchor="nw", text=run,
+                                   font=app.code_font,
+                                   fill=TOKEN_COLORS.get(cls, FG),
+                                   tags="code")
+            cols = tokens[-1][0] + len(tokens[-1][1]) if tokens else 0
+            self._line_cols.append(cols)
+            max_cols = max(max_cols, cols)
+
+        n = len(app.lines)
+        self.content_width = app.pad * 2 + max_cols * app.char_w + 300
+        height = app.pad * 2 + n * lh
+        canvas.configure(scrollregion=(0, 0, self.content_width, height),
+                         yscrollincrement=lh)
+
+        gutter_w = app.pad * 2 + max(2, len(str(n))) * app.char_w
+        for row in range(n):
+            self.gutter.create_text(gutter_w - app.pad, app.pad + row * lh,
+                                    anchor="ne", text=str(row + 1),
+                                    font=app.code_font, fill=GUTTER_FG,
+                                    tags="ln_%d" % (row + 1))
+        self.gutter.configure(width=gutter_w, yscrollincrement=lh,
+                              scrollregion=(0, 0, gutter_w, height))
+        self.yview("moveto", 0)
+        self.canvas.xview_moveto(0)
+
+    # ----------------------------------------------------- scrolling plumbing
+
+    def yview(self, *args):
+        self.canvas.yview(*args)
+        self.gutter.yview(*args)
+
+    def _on_wheel(self, event):
+        step = wheel_steps(event)
+        if event.state & 0x0004:        # Ctrl held — zoom instead of scroll
+            return self.app._zoom(step)
+        self.canvas.yview_scroll(-step * 3, "units")
+        self.gutter.yview_scroll(-step * 3, "units")
+        return "break"
+
+    def _on_xscroll(self, first, last):
+        # notes hug the right edge of the viewport and wrap to clear the
+        # code, so any horizontal viewport shift means a re-wrap
+        self.hbar.set(first, last)
+        self.draw_annotations()
+
+    def _scroll_lines(self, n):
+        self.canvas.yview_scroll(n, "units")
+        self.gutter.yview_scroll(n, "units")
+        return "break"
+
+    def _scroll_pages(self, n):
+        self.canvas.yview_scroll(n, "pages")
+        self.gutter.yview_scroll(n, "pages")
+        return "break"
+
+    def _scroll_home_end(self, frac):
+        self.yview("moveto", frac)
+        return "break"
+
+    def scroll_to_line(self, ln):
+        """Scroll vertically (if needed) so line ``ln`` is comfortably visible."""
+        app = self.app
+        y = app.pad + (ln - 1) * app.line_h
+        top = self.canvas.canvasy(0)
+        view_h = self.canvas.winfo_height()
+        if not (top + app.line_h <= y <= top + view_h - 2 * app.line_h):
+            total = app.pad * 2 + len(app.lines) * app.line_h
+            self.yview("moveto", max(0.0, (y - view_h / 3.0) / total))
+
+    def line_visible(self, ln):
+        app = self.app
+        y = app.pad + (ln - 1) * app.line_h
+        top = self.canvas.canvasy(0)
+        return top <= y <= top + self.canvas.winfo_height() - app.line_h
+
+    def viewport_lines(self):
+        """(top, bottom) 1-based line numbers of the visible region."""
+        app = self.app
+        top = int((self.canvas.canvasy(0) - app.pad) // app.line_h) + 1
+        return top, top + self.canvas.winfo_height() // app.line_h
+
+    # -------------------------------------------------------- overlay drawing
+
+    def _note_x(self):
+        return self.canvas.canvasx(self.canvas.winfo_width()) - 12
+
+    def draw_annotations(self, *_args):
+        app = self.app
+        canvas, lh = self.canvas, app.line_h
+        canvas.delete("ann")
+        canvas.delete("pending")
+        if not app.file_path:
+            return
+
+        alpha = app.opacity.get() / 100.0
+        if app.show_annotations.get():
+            for a in app.annotations:
+                if a["color"] not in app.visible_colors:
+                    continue             # hidden by the toolbar color filter
+                rgb = ANN_COLORS[a["color"]]
+                orphaned = a.get("orphaned")
+                y0 = app.pad + (a["startLine"] - 1) * lh
+                y1 = app.pad + min(a["endLine"], len(app.lines)) * lh
+                band = blend(BG, rgb, alpha * (0.18 if orphaned else 0.45))
+                edge = blend(BG, rgb, min(1.0, alpha * 1.5))
+                tag = ("ann", "ann_" + a["id"])
+                canvas.create_rectangle(0, y0, self.content_width, y1,
+                                        fill=band, outline="", tags=tag)
+                if orphaned:             # dashed edge marks a best-guess spot
+                    canvas.create_line(2, y0 + 1, 2, y1 - 1, fill=edge,
+                                       width=3, dash=(3, 3), tags=tag)
+                else:
+                    canvas.create_rectangle(0, y0, 3, y1, fill=edge,
+                                            outline="", tags=tag)
+                if a["text"]:
+                    self._draw_note(a, y0, tag, alpha)
+            # highlight bands sit under the code so text stays crisp;
+            # note text stays on top (tag_lower/raise error out when the
+            # reference tag matches nothing, e.g. a file of blank lines)
+            if canvas.find_withtag("code"):
+                canvas.tag_lower("ann", "code")
+            canvas.tag_raise("note")
+            if canvas.find_withtag("find") and canvas.find_withtag("ann"):
+                canvas.tag_raise("find", "ann")   # search hits over the bands
+
+        if self._pending:
+            lo, hi = self._pending
+            y0 = app.pad + (lo - 1) * lh
+            y1 = app.pad + hi * lh
+            canvas.create_rectangle(0, y0, self.content_width, y1,
+                                    fill=blend(BG, (14, 99, 156), 0.35),
+                                    outline="", tags="pending")
+            if canvas.find_withtag("code"):
+                canvas.tag_lower("pending", "code")
+
+        count = len(app.annotations)
+        hint = ("Click or drag on line numbers to annotate • "
+                "click a highlight to edit • Ctrl+F to search")
+        if count:
+            hint = "%d annotation%s  •  %s" % (count,
+                                               "s" if count != 1 else "", hint)
+        # don't clobber the placement prompt, a transient confirmation,
+        # or the edit-mode hint
+        if not (app._paste_ann or app._flash_msg or app.edit.active):
+            app.status_hint.config(text=hint)
+
+    def _draw_note(self, a, y0, tag, alpha):
+        """Draw one note, word-wrapped so it stays clear of the code.
+
+        The wrap width is the gap between the right edge of the code and the
+        right edge of the viewport, over the lines the note vertically covers.
+        Wrapping narrower makes the note taller (covering more code lines), so
+        the cleared range is grown iteratively until the layout settles. When
+        the gap is hopeless the width is clamped and the note may overlap."""
+        app = self.app
+        nx = self._note_x()
+        lo = a["startLine"]
+        gap, min_w = 24, 80
+
+        def avail(hi):
+            hi = max(lo, min(hi, len(self._line_cols)))
+            cols = max(self._line_cols[lo - 1:hi] or [0])
+            return int(nx - gap - (app.pad + cols * app.char_w))
+
+        hi_cover = min(a["endLine"], len(app.lines))
+        width = max(min_w, avail(hi_cover))
+        note_fill = blend(BG, (255, 255, 255), min(1.0, 0.35 + alpha * 0.65))
+        prefix = ("⚠ orphaned — " if a.get("orphaned")
+                  else "\U0001F3F7 ")
+        item = self.canvas.create_text(
+            nx, y0 + 2, anchor="ne", width=width, justify="right",
+            text=prefix + a["text"], font=app.note_font,
+            fill=note_fill, tags=tag + ("note",))
+        for _ in range(6):
+            bottom = self.canvas.bbox(item)[3]
+            covered = int((bottom - app.pad) // app.line_h) + 1
+            if covered <= hi_cover or hi_cover >= len(app.lines):
+                break
+            hi_cover = min(covered, len(app.lines))
+            new_w = max(min_w, avail(hi_cover))
+            if new_w >= width:
+                break
+            width = new_w
+            self.canvas.itemconfig(item, width=new_w)
+
+    def flash_annotation(self, a):
+        """Briefly outline an annotation's band so the jump target is obvious."""
+        app = self.app
+        y0 = app.pad + (a["startLine"] - 1) * app.line_h
+        y1 = app.pad + min(a["endLine"], len(app.lines)) * app.line_h
+        rgb = ANN_COLORS[a["color"]]
+        rect = self.canvas.create_rectangle(
+            1, y0, self.content_width - 1, y1,
+            outline="#%02x%02x%02x" % rgb, width=2)
+        app.root.after(700, lambda: self.canvas.delete(rect))
+
+    # -------------------------------------------------- line selection / copy
+
+    def _canvas_line(self, event):
+        app = self.app
+        y = self.canvas.canvasy(event.y) - app.pad
+        return max(1, min(len(app.lines), int(y // app.line_h) + 1))
+
+    def _code_press(self, event):
+        app = self.app
+        if not app.file_path:
+            return
+        self.canvas.focus_set()
+        if app._paste_ann:
+            self._dragged = True         # swallow the matching release/click
+            app._paste_comment_at(self._canvas_line(event))
+            return
+        self._dragged = False
+        self._sel_anchor = self._canvas_line(event)
+
+    def _code_drag(self, event):
+        if self._sel_anchor is None:
+            return
+        line = self._canvas_line(event)
+        if line != self._sel_anchor:
+            self._dragged = True
+        if self._dragged:
+            self.set_selection((min(self._sel_anchor, line),
+                                max(self._sel_anchor, line)))
+
+    def _code_release(self, event):
+        if self._sel_anchor is None:
+            return
+        self._sel_anchor = None
+        if self._dragged:
+            return
+        line = self._canvas_line(event)
+        if (event.state & 0x0001) and self._sel:      # Shift-click extends
+            lo, hi = self._sel
+            self.set_selection((min(lo, line), max(hi, line)))
+        elif self._sel == (line, line):
+            self.set_selection(None)                  # click again to clear
+        else:
+            self.set_selection((line, line))
+
+    def set_selection(self, sel):
+        app = self.app
+        self._sel = sel
+        self.canvas.delete("sel")
+        if not sel:
+            return
+        lo, hi = sel
+        y0 = app.pad + (lo - 1) * app.line_h
+        y1 = app.pad + hi * app.line_h
+        self.canvas.create_rectangle(0, y0, self.content_width, y1,
+                                     fill=blend(BG, (130, 160, 190), 0.16),
+                                     outline="", tags="sel")
+        if self.canvas.find_withtag("code"):
+            self.canvas.tag_lower("sel", "code")
+        n = hi - lo + 1
+        app.status_hint.config(
+            text="%d line%s selected  •  Ctrl+C to copy" %
+                 (n, "s" if n != 1 else ""))
+
+    def copy_selection(self, _event=None):
+        app = self.app
+        widget = app.root.focus_get()
+        if isinstance(widget, (tk.Entry, tk.Text)):
+            return                       # let the field's own copy work
+        if not (app.file_path and self._sel):
+            return
+        lo, hi = self._sel
+        app.root.clipboard_clear()
+        app.root.clipboard_append("\n".join(app.lines[lo - 1:hi]))
+        n = hi - lo + 1
+        app._flash_status("Copied %d line%s to clipboard" %
+                          (n, "s" if n != 1 else ""))
+
+    # -------------------------------------------------- annotation gestures
+
+    def _gutter_line(self, event):
+        app = self.app
+        y = self.gutter.canvasy(event.y) - app.pad
+        return max(1, min(len(app.lines), int(y // app.line_h) + 1))
+
+    def _gutter_press(self, event):
+        app = self.app
+        if not app.file_path:
+            return
+        if app._paste_ann:
+            app._paste_comment_at(self._gutter_line(event))
+            return
+        if app._ann_error:
+            app._flash_status("Annotating is disabled — this file's "
+                              "annotation file could not be parsed")
+            return
+        self._drag_start = self._gutter_line(event)
+        self._pending = (self._drag_start, self._drag_start)
+        self.draw_annotations()
+
+    def _gutter_drag(self, event):
+        if self._drag_start is None:
+            return
+        line = self._gutter_line(event)
+        self._pending = (min(self._drag_start, line),
+                         max(self._drag_start, line))
+        self.draw_annotations()
+
+    def _gutter_release(self, event):
+        app = self.app
+        if self._drag_start is None or not self._pending:
+            return
+        lo, hi = self._pending
+        self._drag_start = None
+        ann = {"id": uuid.uuid4().hex[:8], "startLine": lo, "endLine": hi,
+               "color": "yellow", "text": "",
+               "anchor": anchor_text(app.lines[lo - 1])}
+        app._edit_annotation(ann, is_new=True,
+                             x=event.x_root, y=event.y_root)
+
+    def _on_ann_click(self, event):
+        app = self.app
+        if self._dragged:
+            return                       # end of a drag-selection, not a click
+        items = self.canvas.find_withtag("current")
+        if not items:
+            return
+        ann_id = next((t.split("_", 1)[1] for t in self.canvas.gettags(items[0])
+                       if t.startswith("ann_")), None)
+        ann = next((a for a in app.annotations if a["id"] == ann_id), None)
+        if ann:
+            app._edit_annotation(ann, is_new=False,
+                                 x=event.x_root, y=event.y_root)
+
+
 # ------------------------------------------------------------------ the app
 
 class CodeAnnotatorApp:
@@ -1606,20 +2071,12 @@ class CodeAnnotatorApp:
         self.file_path = None          # currently open file
         self.lines = []
         self.annotations = []
-        self.content_width = 0
         self.show_annotations = tk.BooleanVar(
             value=bool(settings.get("show_annotations", True)))
         self.opacity = tk.DoubleVar(value=float(settings.get("opacity", 55)))
         saved_colors = set(settings.get("visible_colors",
                                         list(ANN_COLORS))) & set(ANN_COLORS)
         self.visible_colors = saved_colors or set(ANN_COLORS)
-        self._drag_start = None        # gutter drag anchor line
-        self._pending = None           # (lo, hi) line range being selected
-        self._tokenized = []           # cached tokens so zoom can re-render
-        self._line_cols = []           # per-line code width, in columns
-        self._sel = None               # selected line range (lo, hi)
-        self._sel_anchor = None        # code-area drag anchor line
-        self._dragged = False          # True once a code-area drag moves
         self._ann_idx = None           # annotation the user last jumped to
         self._paste_ann = None         # annotation being placed as a comment
         self._flash_msg = None         # transient status-bar message
@@ -1694,7 +2151,8 @@ class CodeAnnotatorApp:
             self._chips[name] = chip
         self._draw_chips()
         tk.Checkbutton(bar, text="Annotations", variable=self.show_annotations,
-                       command=self.draw_annotations, bg=BG_PANEL, fg=FG_DIM,
+                       command=lambda: self.viewer.draw_annotations(),
+                       bg=BG_PANEL, fg=FG_DIM,
                        selectcolor=BG, activebackground=BG_PANEL,
                        activeforeground=FG, font=(UI_FONT, 10)).pack(
             side="right", padx=10)
@@ -1709,41 +2167,8 @@ class CodeAnnotatorApp:
         view = tk.Frame(paned, bg=BG)
         paned.add(view, minsize=400)
 
-        self.gutter = tk.Canvas(view, width=56, bg=BG, highlightthickness=0,
-                                cursor="hand2")
-        self.gutter.pack(side="left", fill="y")
-        self.gutter.bind("<Button-1>", self._gutter_press)
-        self.gutter.bind("<B1-Motion>", self._gutter_drag)
-        self.gutter.bind("<ButtonRelease-1>", self._gutter_release)
-
-        code_frame = tk.Frame(view, bg=BG)
-        code_frame.pack(side="left", fill="both", expand=True)
-        self.code_frame = code_frame
-        self.canvas = tk.Canvas(code_frame, bg=BG, highlightthickness=0)
-        vbar = ttk.Scrollbar(code_frame, orient="vertical", command=self._yview)
-        self.hbar = ttk.Scrollbar(code_frame, orient="horizontal",
-                                  command=self.canvas.xview)
-        self.canvas.configure(yscrollcommand=vbar.set, xscrollcommand=self._on_xscroll)
-        vbar.pack(side="right", fill="y")
-        self.hbar.pack(side="bottom", fill="x")
-        self.canvas.pack(side="left", fill="both", expand=True)
-
-        for widget in (self.canvas, self.gutter):
-            bind_mousewheel(widget, self._on_wheel)
-            widget.bind("<Up>", lambda e: self._scroll_lines(-1))
-            widget.bind("<Down>", lambda e: self._scroll_lines(1))
-            widget.bind("<Prior>", lambda e: self._scroll_pages(-1))
-            widget.bind("<Next>", lambda e: self._scroll_pages(1))
-            widget.bind("<Home>", lambda e: self._scroll_home_end(0))
-            widget.bind("<End>", lambda e: self._scroll_home_end(1))
-            widget.bind("<Alt-Up>", lambda e: self._goto_annotation(-1))
-            widget.bind("<Alt-Down>", lambda e: self._goto_annotation(1))
-        self.canvas.bind("<Configure>", lambda e: self.draw_annotations())
-        self.canvas.tag_bind("ann", "<ButtonRelease-1>", self._on_ann_click)
-        self.canvas.bind("<Button-1>", self._code_press)
-        self.canvas.bind("<B1-Motion>", self._code_drag)
-        self.canvas.bind("<ButtonRelease-1>", self._code_release)
-        self.finder = FindController(self, code_frame)
+        self.viewer = ViewerPane(self, view)
+        self.finder = FindController(self, self.viewer.code_frame)
         self.edit = EditorPane(self, view)
         self._bind_shortcuts()
 
@@ -1759,27 +2184,7 @@ class CodeAnnotatorApp:
             bg="#007acc", fg="#cde6f7", font=(UI_FONT, 9))
         self.status_hint.pack(side="right", padx=10)
 
-        self._show_welcome()
-
-    def _show_welcome(self):
-        self.canvas.delete("all")
-        cx = max(360, self.canvas.winfo_width() // 2)
-        self.canvas.create_text(
-            cx, 120, fill=FG, font=(UI_FONT, 20), tags="welcome",
-            text="Code Annotator")
-        self.canvas.create_text(
-            cx, 190, fill=FG_DIM, font=(UI_FONT, 11), justify="center",
-            tags="welcome",
-            text="Open a project folder, pick a code file, and see its\n"
-                 "annotations overlaid transparently on the source.\n\n"
-                 "Click or drag on the line numbers to add an annotation.\n"
-                 "Click an existing highlight to edit it.\n\n"
-                 "Ctrl+F finds text, Ctrl+G jumps to a line, Ctrl+C copies\n"
-                 "selected lines, Ctrl+wheel or Ctrl+=/- zooms the code,\n"
-                 "Alt+Down/Alt+Up jump to the next/previous annotation.\n\n"
-                 "Notes are saved in a parallel tree that mirrors the\n"
-                 "source layout (default: <project>/" + ANN_DIR_NAME + "),\n"
-                 "so the source files themselves are never touched.")
+        self.viewer.show_welcome()
 
     def _bind_shortcuts(self):
         binds = (("<Control-f>", self._open_find),
@@ -1788,7 +2193,7 @@ class CodeAnnotatorApp:
                  ("<Shift-F3>", self._find_prev),
                  ("<Escape>", self._close_bars),
                  ("<Control-z>", self._undo_delete),
-                 ("<Control-c>", self._copy_selection),
+                 ("<Control-c>", lambda e: self.viewer.copy_selection(e)),
                  ("<Control-plus>", lambda e: self._zoom(1)),
                  ("<Control-equal>", lambda e: self._zoom(1)),
                  ("<Control-minus>", lambda e: self._zoom(-1)),
@@ -1831,7 +2236,7 @@ class CodeAnnotatorApp:
         else:
             self.visible_colors.add(name)
         self._draw_chips()
-        self.draw_annotations()
+        self.viewer.draw_annotations()
         if self.edit.active:
             self.edit.update_band_colors()
 
@@ -1897,18 +2302,13 @@ class CodeAnnotatorApp:
             self._sidecar_mtime = os.path.getmtime(sidecar)
         except OSError:
             self._sidecar_mtime = None
-        self._pending = None
-        self._drag_start = None
-        self._sel = None
-        self._sel_anchor = None
         self._ann_idx = None
         self._paste_ann = None
 
         lang_id = lang_for(os.path.basename(path))
         self.lang_id = lang_id
-        self._tokenized = highlight_lines(lines, lang_id)
-        self._render_code(self._tokenized)
-        self.draw_annotations()
+        self.viewer.render(highlight_lines(lines, lang_id))
+        self.viewer.draw_annotations()
         self.finder.on_file_opened()
         self.tree_pane.refresh_outline(self.annotations)
 
@@ -1934,215 +2334,32 @@ class CodeAnnotatorApp:
         self.file_path = None
         self.lines = []
         self.annotations = []
-        self._tokenized = []
-        self._line_cols = []
-        self._sel = None
         self.finder.reset()
         self._ann_idx = None
         self._paste_ann = None
         self._ann_error = False
         self._sidecar_mtime = None
         self.tree_pane.refresh_outline([])
-        self.canvas.delete("all")
-        self.gutter.delete("all")
-        self.canvas.create_text(
-            max(360, self.canvas.winfo_width() // 2), 120,
-            fill=FG_DIM, font=(UI_FONT, 11), text=msg)
+        self.viewer.clear(msg)
         self.status_file.config(text="Ready")
 
-    def _render_code(self, tokenized):
-        canvas, lh = self.canvas, self.line_h
-        canvas.delete("all")
-        self.gutter.delete("all")
-
-        max_cols = 0
-        self._line_cols = []
-        for row, tokens in enumerate(tokenized):
-            y = self.pad + row * lh
-            for col, run, cls in tokens:
-                if not run.strip() and cls is None:
-                    continue
-                canvas.create_text(self.pad + col * self.char_w, y,
-                                   anchor="nw", text=run,
-                                   font=self.code_font,
-                                   fill=TOKEN_COLORS.get(cls, FG),
-                                   tags="code")
-            cols = tokens[-1][0] + len(tokens[-1][1]) if tokens else 0
-            self._line_cols.append(cols)
-            max_cols = max(max_cols, cols)
-
-        n = len(self.lines)
-        self.content_width = self.pad * 2 + max_cols * self.char_w + 300
-        height = self.pad * 2 + n * lh
-        canvas.configure(scrollregion=(0, 0, self.content_width, height),
-                         yscrollincrement=lh)
-
-        gutter_w = self.pad * 2 + max(2, len(str(n))) * self.char_w
-        for row in range(n):
-            self.gutter.create_text(gutter_w - self.pad, self.pad + row * lh,
-                                    anchor="ne", text=str(row + 1),
-                                    font=self.code_font, fill=GUTTER_FG,
-                                    tags="ln_%d" % (row + 1))
-        self.gutter.configure(width=gutter_w, yscrollincrement=lh,
-                              scrollregion=(0, 0, gutter_w, height))
-        self._yview("moveto", 0)
-        self.canvas.xview_moveto(0)
-
-    # ----------------------------------------------------- scrolling plumbing
-
-    def _yview(self, *args):
-        self.canvas.yview(*args)
-        self.gutter.yview(*args)
-
     def _on_opacity(self, _value=None):
-        self.draw_annotations()
+        self.viewer.draw_annotations()
         if self.edit.active:
             self.edit.update_band_colors()
-
-    def _on_wheel(self, event):
-        step = wheel_steps(event)
-        if event.state & 0x0004:        # Ctrl held — zoom instead of scroll
-            return self._zoom(step)
-        self.canvas.yview_scroll(-step * 3, "units")
-        self.gutter.yview_scroll(-step * 3, "units")
-        return "break"
-
-    def _on_xscroll(self, first, last):
-        # notes hug the right edge of the viewport and wrap to clear the
-        # code, so any horizontal viewport shift means a re-wrap
-        self.hbar.set(first, last)
-        self.draw_annotations()
-
-    # -------------------------------------------------------- overlay drawing
-
-    def _note_x(self):
-        return self.canvas.canvasx(self.canvas.winfo_width()) - 12
-
-    def draw_annotations(self, *_args):
-        canvas, lh = self.canvas, self.line_h
-        canvas.delete("ann")
-        canvas.delete("pending")
-        if not self.file_path:
-            return
-
-        alpha = self.opacity.get() / 100.0
-        if self.show_annotations.get():
-            for a in self.annotations:
-                if a["color"] not in self.visible_colors:
-                    continue             # hidden by the toolbar color filter
-                rgb = ANN_COLORS[a["color"]]
-                orphaned = a.get("orphaned")
-                y0 = self.pad + (a["startLine"] - 1) * lh
-                y1 = self.pad + min(a["endLine"], len(self.lines)) * lh
-                band = blend(BG, rgb, alpha * (0.18 if orphaned else 0.45))
-                edge = blend(BG, rgb, min(1.0, alpha * 1.5))
-                tag = ("ann", "ann_" + a["id"])
-                canvas.create_rectangle(0, y0, self.content_width, y1,
-                                        fill=band, outline="", tags=tag)
-                if orphaned:             # dashed edge marks a best-guess spot
-                    canvas.create_line(2, y0 + 1, 2, y1 - 1, fill=edge,
-                                       width=3, dash=(3, 3), tags=tag)
-                else:
-                    canvas.create_rectangle(0, y0, 3, y1, fill=edge,
-                                            outline="", tags=tag)
-                if a["text"]:
-                    self._draw_note(a, y0, tag, alpha)
-            # highlight bands sit under the code so text stays crisp;
-            # note text stays on top (tag_lower/raise error out when the
-            # reference tag matches nothing, e.g. a file of blank lines)
-            if canvas.find_withtag("code"):
-                canvas.tag_lower("ann", "code")
-            canvas.tag_raise("note")
-            if canvas.find_withtag("find") and canvas.find_withtag("ann"):
-                canvas.tag_raise("find", "ann")   # search hits over the bands
-
-        if self._pending:
-            lo, hi = self._pending
-            y0 = self.pad + (lo - 1) * lh
-            y1 = self.pad + hi * lh
-            canvas.create_rectangle(0, y0, self.content_width, y1,
-                                    fill=blend(BG, (14, 99, 156), 0.35),
-                                    outline="", tags="pending")
-            if canvas.find_withtag("code"):
-                canvas.tag_lower("pending", "code")
-
-        count = len(self.annotations)
-        hint = ("Click or drag on line numbers to annotate • "
-                "click a highlight to edit • Ctrl+F to search")
-        if count:
-            hint = "%d annotation%s  •  %s" % (count,
-                                               "s" if count != 1 else "", hint)
-        # don't clobber the placement prompt, a transient confirmation,
-        # or the edit-mode hint
-        if not (self._paste_ann or self._flash_msg or self.edit.active):
-            self.status_hint.config(text=hint)
-
-    def _draw_note(self, a, y0, tag, alpha):
-        """Draw one note, word-wrapped so it stays clear of the code.
-
-        The wrap width is the gap between the right edge of the code and the
-        right edge of the viewport, over the lines the note vertically covers.
-        Wrapping narrower makes the note taller (covering more code lines), so
-        the cleared range is grown iteratively until the layout settles. When
-        the gap is hopeless the width is clamped and the note may overlap."""
-        nx = self._note_x()
-        lo = a["startLine"]
-        gap, min_w = 24, 80
-
-        def avail(hi):
-            hi = max(lo, min(hi, len(self._line_cols)))
-            cols = max(self._line_cols[lo - 1:hi] or [0])
-            return int(nx - gap - (self.pad + cols * self.char_w))
-
-        hi_cover = min(a["endLine"], len(self.lines))
-        width = max(min_w, avail(hi_cover))
-        note_fill = blend(BG, (255, 255, 255), min(1.0, 0.35 + alpha * 0.65))
-        prefix = ("⚠ orphaned — " if a.get("orphaned")
-                  else "\U0001F3F7 ")
-        item = self.canvas.create_text(
-            nx, y0 + 2, anchor="ne", width=width, justify="right",
-            text=prefix + a["text"], font=self.note_font,
-            fill=note_fill, tags=tag + ("note",))
-        for _ in range(6):
-            bottom = self.canvas.bbox(item)[3]
-            covered = int((bottom - self.pad) // self.line_h) + 1
-            if covered <= hi_cover or hi_cover >= len(self.lines):
-                break
-            hi_cover = min(covered, len(self.lines))
-            new_w = max(min_w, avail(hi_cover))
-            if new_w >= width:
-                break
-            width = new_w
-            self.canvas.itemconfig(item, width=new_w)
-
-    # ------------------------------------------------- navigation / dismissal
 
     def _close_bars(self, _event=None):
         """Escape: dismiss find/goto bars, selection, and paste placement."""
         if self.edit.active:
             return
-        if not (self.finder.visible() or self._sel or self.finder.matches
-                or self._paste_ann):
+        if not (self.finder.visible() or self.viewer._sel
+                or self.finder.matches or self._paste_ann):
             return
         self._paste_ann = None
         self.finder.close_bars()
-        self._set_selection(None)
-        self.draw_annotations()          # restores the default status hint
-        self.canvas.focus_set()
-
-    def _scroll_to_line(self, ln):
-        """Scroll vertically (if needed) so line ``ln`` is comfortably visible."""
-        y = self.pad + (ln - 1) * self.line_h
-        top = self.canvas.canvasy(0)
-        view_h = self.canvas.winfo_height()
-        if not (top + self.line_h <= y <= top + view_h - 2 * self.line_h):
-            total = self.pad * 2 + len(self.lines) * self.line_h
-            self._yview("moveto", max(0.0, (y - view_h / 3.0) / total))
-
-    def _line_visible(self, ln):
-        y = self.pad + (ln - 1) * self.line_h
-        top = self.canvas.canvasy(0)
-        return top <= y <= top + self.canvas.winfo_height() - self.line_h
+        self.viewer.set_selection(None)
+        self.viewer.draw_annotations()   # restores the default status hint
+        self.viewer.canvas.focus_set()
 
     def _goto_annotation(self, step, _event=None):
         """Alt+Down / Alt+Up: cycle to the next / previous annotation."""
@@ -2153,18 +2370,17 @@ class CodeAnnotatorApp:
             return "break"
         idx = self._ann_idx
         if (idx is not None and 0 <= idx < len(anns)
-                and self._line_visible(anns[idx]["startLine"])):
+                and self.viewer.line_visible(anns[idx]["startLine"])):
             idx = (idx + step) % len(anns)
         else:
             # lost track (scrolled away, file changed): pick relative to
             # the view — next scans down from its top edge, previous scans
             # up from its bottom edge, so visible annotations come first
-            top = int((self.canvas.canvasy(0) - self.pad) // self.line_h) + 1
+            top, bottom = self.viewer.viewport_lines()
             if step > 0:
                 idx = next((i for i, a in enumerate(anns)
                             if a["startLine"] > top), 0)
             else:
-                bottom = top + self.canvas.winfo_height() // self.line_h
                 idx = next((i for i in range(len(anns) - 1, -1, -1)
                             if anns[i]["startLine"] < bottom),
                            len(anns) - 1)
@@ -2179,38 +2395,14 @@ class CodeAnnotatorApp:
         idx = max(0, min(idx, len(anns) - 1))
         self._ann_idx = idx
         a = anns[idx]
-        self._scroll_to_line(a["startLine"])
-        self._flash_annotation(a)
+        self.viewer.scroll_to_line(a["startLine"])
+        self.viewer.flash_annotation(a)
         note = a["text"].replace("\n", " ")
         if len(note) > 60:
             note = note[:57] + "..."
         self.status_hint.config(
             text="Annotation %d of %d%s" %
                  (idx + 1, len(anns), "  •  " + note if note else ""))
-
-    def _flash_annotation(self, a):
-        """Briefly outline an annotation's band so the jump target is obvious."""
-        y0 = self.pad + (a["startLine"] - 1) * self.line_h
-        y1 = self.pad + min(a["endLine"], len(self.lines)) * self.line_h
-        rgb = ANN_COLORS[a["color"]]
-        rect = self.canvas.create_rectangle(
-            1, y0, self.content_width - 1, y1,
-            outline="#%02x%02x%02x" % rgb, width=2)
-        self.root.after(700, lambda: self.canvas.delete(rect))
-
-    def _scroll_lines(self, n):
-        self.canvas.yview_scroll(n, "units")
-        self.gutter.yview_scroll(n, "units")
-        return "break"
-
-    def _scroll_pages(self, n):
-        self.canvas.yview_scroll(n, "pages")
-        self.gutter.yview_scroll(n, "pages")
-        return "break"
-
-    def _scroll_home_end(self, frac):
-        self._yview("moveto", frac)
-        return "break"
 
     def _zoom(self, delta, _event=None):
         cur = self.code_font.cget("size")
@@ -2222,13 +2414,8 @@ class CodeAnnotatorApp:
             self.line_h = self.code_font.metrics("linespace") + 4
             if self.edit.active:
                 self.edit.on_zoom()
-            elif self.file_path:
-                first = self.canvas.yview()[0]
-                self._render_code(self._tokenized)
-                self.draw_annotations()
-                self.finder.draw()
-                self._set_selection(self._sel)
-                self._yview("moveto", first)
+            else:
+                self.viewer.on_zoom()
         return "break"
 
     # -------------------------------------------------- line selection / copy
@@ -2247,78 +2434,7 @@ class CodeAnnotatorApp:
         if self.edit.active:
             self.edit._set_hint()
         else:
-            self.draw_annotations()      # restores the regular hint
-
-    def _canvas_line(self, event):
-        y = self.canvas.canvasy(event.y) - self.pad
-        return max(1, min(len(self.lines), int(y // self.line_h) + 1))
-
-    def _code_press(self, event):
-        if not self.file_path:
-            return
-        self.canvas.focus_set()
-        if self._paste_ann:
-            self._dragged = True         # swallow the matching release/click
-            self._paste_comment_at(self._canvas_line(event))
-            return
-        self._dragged = False
-        self._sel_anchor = self._canvas_line(event)
-
-    def _code_drag(self, event):
-        if self._sel_anchor is None:
-            return
-        line = self._canvas_line(event)
-        if line != self._sel_anchor:
-            self._dragged = True
-        if self._dragged:
-            self._set_selection((min(self._sel_anchor, line),
-                                 max(self._sel_anchor, line)))
-
-    def _code_release(self, event):
-        if self._sel_anchor is None:
-            return
-        self._sel_anchor = None
-        if self._dragged:
-            return
-        line = self._canvas_line(event)
-        if (event.state & 0x0001) and self._sel:      # Shift-click extends
-            lo, hi = self._sel
-            self._set_selection((min(lo, line), max(hi, line)))
-        elif self._sel == (line, line):
-            self._set_selection(None)                 # click again to clear
-        else:
-            self._set_selection((line, line))
-
-    def _set_selection(self, sel):
-        self._sel = sel
-        self.canvas.delete("sel")
-        if not sel:
-            return
-        lo, hi = sel
-        y0 = self.pad + (lo - 1) * self.line_h
-        y1 = self.pad + hi * self.line_h
-        self.canvas.create_rectangle(0, y0, self.content_width, y1,
-                                     fill=blend(BG, (130, 160, 190), 0.16),
-                                     outline="", tags="sel")
-        if self.canvas.find_withtag("code"):
-            self.canvas.tag_lower("sel", "code")
-        n = hi - lo + 1
-        self.status_hint.config(
-            text="%d line%s selected  •  Ctrl+C to copy" %
-                 (n, "s" if n != 1 else ""))
-
-    def _copy_selection(self, _event=None):
-        widget = self.root.focus_get()
-        if isinstance(widget, (tk.Entry, tk.Text)):
-            return                       # let the field's own copy work
-        if not (self.file_path and self._sel):
-            return
-        lo, hi = self._sel
-        self.root.clipboard_clear()
-        self.root.clipboard_append("\n".join(self.lines[lo - 1:hi]))
-        n = hi - lo + 1
-        self._flash_status("Copied %d line%s to clipboard" %
-                           (n, "s" if n != 1 else ""))
+            self.viewer.draw_annotations()      # restores the regular hint
 
     def _save_settings(self):
         if not self.settings_path:
@@ -2343,63 +2459,14 @@ class CodeAnnotatorApp:
 
     # -------------------------------------------------- annotation interaction
 
-    def _gutter_line(self, event):
-        y = self.gutter.canvasy(event.y) - self.pad
-        return max(1, min(len(self.lines), int(y // self.line_h) + 1))
-
-    def _gutter_press(self, event):
-        if not self.file_path:
-            return
-        if self._paste_ann:
-            self._paste_comment_at(self._gutter_line(event))
-            return
-        if self._ann_error:
-            self._flash_status("Annotating is disabled — this file's "
-                               "annotation file could not be parsed")
-            return
-        self._drag_start = self._gutter_line(event)
-        self._pending = (self._drag_start, self._drag_start)
-        self.draw_annotations()
-
-    def _gutter_drag(self, event):
-        if self._drag_start is None:
-            return
-        line = self._gutter_line(event)
-        self._pending = (min(self._drag_start, line), max(self._drag_start, line))
-        self.draw_annotations()
-
-    def _gutter_release(self, event):
-        if self._drag_start is None or not self._pending:
-            return
-        lo, hi = self._pending
-        self._drag_start = None
-        ann = {"id": uuid.uuid4().hex[:8], "startLine": lo, "endLine": hi,
-               "color": "yellow", "text": "",
-               "anchor": anchor_text(self.lines[lo - 1])}
-        self._edit_annotation(ann, is_new=True,
-                              x=event.x_root, y=event.y_root)
-
-    def _on_ann_click(self, event):
-        if self._dragged:
-            return                       # end of a drag-selection, not a click
-        items = self.canvas.find_withtag("current")
-        if not items:
-            return
-        ann_id = next((t.split("_", 1)[1] for t in self.canvas.gettags(items[0])
-                       if t.startswith("ann_")), None)
-        ann = next((a for a in self.annotations if a["id"] == ann_id), None)
-        if ann:
-            self._edit_annotation(ann, is_new=False,
-                                  x=event.x_root, y=event.y_root)
-
     def _edit_annotation(self, ann, is_new, x, y):
         can_paste = (comment_lines("x", self.lang_id) is not None
                      and not self._truncated)
         dialog = AnnotationDialog(self.root, ann, is_new, x, y,
                                   can_paste=can_paste)
         self.root.wait_window(dialog)
-        self.canvas.focus_set()          # keyboard focus back to the app
-        self._pending = None
+        self.viewer.canvas.focus_set()          # keyboard focus back to the app
+        self.viewer._pending = None             # clear the gutter drag band
         if dialog.result in ("save", "paste"):
             ann["orphaned"] = False      # user re-confirmed this location
             if 1 <= ann["startLine"] <= len(self.lines):
@@ -2417,7 +2484,7 @@ class CodeAnnotatorApp:
             self._persist()
             self._flash_status("Annotation deleted — Ctrl+Z restores",
                                ms=6000)
-        self.draw_annotations()
+        self.viewer.draw_annotations()
         if dialog.result == "paste" and ann["text"]:
             self._start_paste(ann)
 
@@ -2444,7 +2511,7 @@ class CodeAnnotatorApp:
         ann, self._paste_ann = self._paste_ann, None
         rendered = comment_lines(ann["text"], self.lang_id)
         if not rendered:
-            self.draw_annotations()
+            self.viewer.draw_annotations()
             return
         if not self.edit.active:
             self.edit.enter()
@@ -2482,7 +2549,7 @@ class CodeAnnotatorApp:
         self.annotations.append(ann)
         self.annotations.sort(key=lambda a: a["startLine"])
         self._persist()
-        self.draw_annotations()
+        self.viewer.draw_annotations()
         self._flash_status("Annotation restored")
         return "break"
 
@@ -2511,7 +2578,7 @@ class CodeAnnotatorApp:
         # heal in memory only: don't write back while another tool is writing
         reconcile_annotations(self.annotations, self.lines)
         self._ann_idx = None
-        self.draw_annotations()
+        self.viewer.draw_annotations()
         self.tree_pane.refresh_outline(self.annotations)
         self.tree_pane.refresh_badge(self.file_path)
         self._flash_status("Annotations reloaded (changed outside the app)")

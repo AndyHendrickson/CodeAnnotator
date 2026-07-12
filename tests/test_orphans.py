@@ -47,12 +47,12 @@ assert app.annotations[0]["orphaned"] is True
 print("full deletion -> orphaned at the deletion point OK")
 
 # --- viewer renders it distinctly: dashed edge + warning note prefix ---
-note = [i for i in app.canvas.find_withtag("note")
-        if "ann_one" in app.canvas.gettags(i)]
-assert note and app.canvas.itemcget(note[0], "text").startswith("⚠ orphaned"), \
-    app.canvas.itemcget(note[0], "text") if note else "no note"
-dashed = [i for i in app.canvas.find_withtag("ann_one")
-          if app.canvas.type(i) == "line"]
+note = [i for i in app.viewer.canvas.find_withtag("note")
+        if "ann_one" in app.viewer.canvas.gettags(i)]
+assert note and app.viewer.canvas.itemcget(note[0], "text").startswith("⚠ orphaned"), \
+    app.viewer.canvas.itemcget(note[0], "text") if note else "no note"
+dashed = [i for i in app.viewer.canvas.find_withtag("ann_one")
+          if app.viewer.canvas.type(i) == "line"]
 assert dashed, "no dashed orphan edge drawn"
 print("orphaned rendering (warning note + dashed edge) OK")
 

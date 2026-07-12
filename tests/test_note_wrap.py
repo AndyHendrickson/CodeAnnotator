@@ -34,20 +34,20 @@ long_text = ("This is a deliberately long annotation note that must wrap "
              "preserved rather than flattened into spaces.")
 app.annotations.append({"id": "testnote", "startLine": 26, "endLine": 27,
                         "color": "green", "text": long_text})
-app.draw_annotations()
+app.viewer.draw_annotations()
 root.update()
 
 def note_item():
-    for it in app.canvas.find_withtag("note"):
-        if "ann_testnote" in app.canvas.gettags(it):
+    for it in app.viewer.canvas.find_withtag("note"):
+        if "ann_testnote" in app.viewer.canvas.gettags(it):
             return it
     raise AssertionError("test note not drawn")
 
 it = note_item()
-assert "\n" in app.canvas.itemcget(it, "text"), "line break flattened"
-w1 = int(float(app.canvas.itemcget(it, "width")))
+assert "\n" in app.viewer.canvas.itemcget(it, "text"), "line break flattened"
+w1 = int(float(app.viewer.canvas.itemcget(it, "width")))
 assert w1 > 0, "no wrap width set"
-x0, y0, x1, y1 = app.canvas.bbox(it)
+x0, y0, x1, y1 = app.viewer.canvas.bbox(it)
 note_lh = app.note_font.metrics("linespace")
 n_note_lines = round((y1 - y0) / float(note_lh))
 assert n_note_lines >= 3, "expected >=3 note lines, got %d" % n_note_lines
@@ -55,44 +55,44 @@ assert n_note_lines >= 3, "expected >=3 note lines, got %d" % n_note_lines
 # the note must clear the code on every line it covers (when space allowed)
 lo = 26
 covered_hi = min(len(app.lines), int((y1 - app.pad) // app.line_h) + 1)
-code_right = app.pad + max(app._line_cols[lo - 1:covered_hi]) * app.char_w
+code_right = app.pad + max(app.viewer._line_cols[lo - 1:covered_hi]) * app.char_w
 if w1 > 80:  # not clamped: overlap must be avoided
     assert x0 >= code_right, (x0, code_right)
 print("wrap + code avoidance OK: width=%d, note spans y %d..%d, code right=%d"
       % (w1, y0, y1, code_right))
 
 # right edge hugs the viewport
-vx = app.canvas.canvasx(app.canvas.winfo_width()) - 12
+vx = app.viewer.canvas.canvasx(app.viewer.canvas.winfo_width()) - 12
 assert abs(x1 - vx) < 30, (x1, vx)
 
 # --- resize re-wraps ---
 root.geometry("1000x900+3000+3000")
 root.update()
 it = note_item()
-w2 = int(float(app.canvas.itemcget(it, "width")))
+w2 = int(float(app.viewer.canvas.itemcget(it, "width")))
 assert w2 < w1, ("resize did not re-wrap", w1, w2)
 print("resize re-wrap OK: %d -> %d" % (w1, w2))
 
 # --- horizontal scroll re-wraps and follows the viewport ---
-app.canvas.xview_moveto(0.3)
+app.viewer.canvas.xview_moveto(0.3)
 root.update()
 it = note_item()
-x1b = app.canvas.bbox(it)[2]
-vx = app.canvas.canvasx(app.canvas.winfo_width()) - 12
+x1b = app.viewer.canvas.bbox(it)[2]
+vx = app.viewer.canvas.canvasx(app.viewer.canvas.winfo_width()) - 12
 assert abs(x1b - vx) < 30, (x1b, vx)
 print("h-scroll re-wrap OK")
 
 # hopeless gap: note over very long code lines clamps but still renders
-app.canvas.xview_moveto(0)
-longest = max(range(len(app._line_cols)), key=lambda i: app._line_cols[i]) + 1
+app.viewer.canvas.xview_moveto(0)
+longest = max(range(len(app.viewer._line_cols)), key=lambda i: app.viewer._line_cols[i]) + 1
 app.annotations.append({"id": "clampnote", "startLine": longest,
                         "endLine": longest, "color": "pink",
                         "text": "note over the longest line " * 3})
-app.draw_annotations()
+app.viewer.draw_annotations()
 root.update()
-found = [it for it in app.canvas.find_withtag("note")
-         if "ann_clampnote" in app.canvas.gettags(it)]
-assert found and int(float(app.canvas.itemcget(found[0], "width"))) >= 80
+found = [it for it in app.viewer.canvas.find_withtag("note")
+         if "ann_clampnote" in app.viewer.canvas.gettags(it)]
+assert found and int(float(app.viewer.canvas.itemcget(found[0], "width"))) >= 80
 print("clamped-width fallback OK")
 
 root.destroy()

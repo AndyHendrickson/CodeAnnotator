@@ -42,10 +42,10 @@ down_x11 = types.SimpleNamespace(num=5, delta=0, state=0)
 up_win = types.SimpleNamespace(num=0, delta=120, state=0)
 assert ca.wheel_steps(up_x11) == 1 and ca.wheel_steps(down_x11) == -1
 assert ca.wheel_steps(up_win) == 1
-app._scroll_home_end(0)
-app._on_wheel(down_x11)                 # X11-style scroll down
-assert app.canvas.canvasy(0) > 0
-app._on_wheel(up_x11)
+app.viewer._scroll_home_end(0)
+app.viewer._on_wheel(down_x11)                 # X11-style scroll down
+assert app.viewer.canvas.canvasy(0) > 0
+app.viewer._on_wheel(up_x11)
 print("portable wheel OK")
 
 # --- outline panel lists annotations; clicking jumps ---
@@ -58,14 +58,14 @@ assert "Annotation 2 of 2" in app.status_hint.cget("text")
 print("outline panel OK")
 
 # --- color filter hides bands without touching the data ---
-assert app.canvas.find_withtag("ann_two")
+assert app.viewer.canvas.find_withtag("ann_two")
 app._toggle_color("orange")
 assert "orange" not in app.visible_colors
-assert not app.canvas.find_withtag("ann_two"), "filtered band still drawn"
-assert app.canvas.find_withtag("ann_one"), "unfiltered band vanished"
+assert not app.viewer.canvas.find_withtag("ann_two"), "filtered band still drawn"
+assert app.viewer.canvas.find_withtag("ann_one"), "unfiltered band vanished"
 assert len(app.annotations) == 2        # data untouched
 app._toggle_color("orange")
-assert app.canvas.find_withtag("ann_two")
+assert app.viewer.canvas.find_withtag("ann_two")
 print("color filter OK")
 
 # --- delete undo ---
