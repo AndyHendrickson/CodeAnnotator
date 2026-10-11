@@ -56,9 +56,19 @@ selection and `Ctrl+C` copy, zoom (`Ctrl+wheel`, `Ctrl+=`/`-`/`0`), the
 opacity slider and per-color visibility filter, live sidecar reload while a
 file is open, and binary/oversize-file guards.
 
-**Not ported** (use the Python app for these): the in-app source editor
-("✎ Edit" mode) and "insert note as comment". This port never modifies
-source files.
+**Edit mode** is ported too: *✎ Edit* in the toolbar swaps in a source
+editor over the same file — syntax colors (re-scanned incrementally as you
+type), undo/redo (`Ctrl+Z`, `Ctrl+Y`/`Ctrl+Shift+Z`), cut/copy/paste,
+`Ctrl+A`, word navigation, and `Ctrl+F`/`Ctrl+G` within the editor. `Ctrl+S`
+or *Save* writes the file atomically; *✓ Done* returns to the annotate view,
+prompting about unsaved changes (as do switching files, opening a folder and
+closing the window). Annotation bands ride along with the text and their
+line positions are saved with the file; an annotated region deleted
+entirely collapses to the deletion point and is marked orphaned. Editing
+requires valid UTF-8 (BOM and newline style are preserved) and asks before
+overwriting a file that changed on disk.
+
+**Not ported** (use the Python app for this): "insert note as comment".
 
 ## Source layout
 

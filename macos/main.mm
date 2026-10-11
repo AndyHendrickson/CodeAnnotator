@@ -10,8 +10,8 @@
 // Shortcuts follow macOS conventions: Cmd+F find, Cmd+G / Shift+Cmd+G next
 // and previous match, Cmd+L go to line, Cmd+C copy, Cmd+Z restore deleted
 // annotation, Cmd+= / Cmd+- / Cmd+0 zoom, Option+Down / Option+Up next and
-// previous annotation. Like the Windows port, the in-app source editor and
-// "insert note as comment" are not included; sources are never modified.
+// previous annotation, Cmd+E toggles the source editor and Cmd+S saves it.
+// Like the Windows port, "insert note as comment" is not included.
 
 #import <Cocoa/Cocoa.h>
 
@@ -175,6 +175,42 @@ static CGFloat			gGutterW		= 56;
 static bool				gFlashActive	= false;
 static std::vector<std::pair<NSRect, int>>	gNoteRects;	 // doc coords
 
+// --------------------------------------------------------- edit mode state
+
+@class EditorView;
+@class LineRuler;
+
+struct EdBand					// an annotation's region as UTF-16 offsets [start, end)
+{
+	NSUInteger	start	= 0;
+	NSUInteger	end		= 0;
+};
+
+struct EdState
+{
+	bool		active		= false;
+	bool		dirty		= false;		// unsaved editor changes
+	bool		loading		= false;		// programmatic text replacement
+	bool		crlf		= false;
+	bool		bom			= false;
+	std::optional<fs::file_time_type>	mtime;		// source mtime at enter/last save
+	std::vector<NSUInteger>				lineStarts;	// UTF-16 offset of each line
+	std::vector<hl::ScanState>			states;		// scanner state at each line start
+	std::vector<EdBand>					bands;		// parallel to S.anns
+	int			hlLo		= -1;			// lines awaiting re-highlight
+	int			hlHi		= -1;
+	bool		hlQueued	= false;
+};
+
+static EdState			E;
+static EditorView*		gEditor;
+static NSTextStorage*	gEditStorage;		// the text view doesn't own it
+static NSUndoManager*	gEditUndo;
+static NSScrollView*	gEditScroll;
+static LineRuler*		gRuler;
+static NSButton*		gEditBtn;
+static NSButton*		gSaveBtn;
+
 // ------------------------------------------------------------------ helpers
 
 static NSString* NSStr(const std::string& u)
@@ -251,6 +287,15 @@ static void RefreshBadge(const fs::path& p);
 static void OpenFile(const fs::path& p);
 static void EditAnnotation(Annotation ann, bool isNew, int existingIdx);
 static void EscapeAction();
+static void FindRefresh(bool jump = true);
+static void Zoom(int delta);
+static void EdGotoLine(int ln, int col = 0);
+static void EdGotoBand(int idx);
+static void EdOnZoom();
+static bool EdExit();
+static bool EdSave();
+static void EdToggle();
+static std::vector<std::wstring> EdLines();
 
 // ------------------------------------------------------------------- status
 
@@ -262,6 +307,14 @@ static void SetHint(const std::string& text)
 static void DefaultHint()
 {
 	if (gFlashActive) return;
+
+	if (E.active)
+	{
+		SetHint("Editing • Cmd+Z undo • Shift+Cmd+Z redo • Cmd+S save • "
+				"Done returns to the annotate view");
+
+		return;
+	}
 
 	std::string	hint	=	"Click or drag on line numbers to annotate • "
 							"click a highlight to edit • Cmd+F to search";
@@ -329,6 +382,13 @@ static void ShowAnnotationAt(int idx)
 	idx			= std::max(0, std::min(idx, (int)S.anns.size() - 1));
 	S.annIdx	= idx;
 
+	if (E.active)						// jump the editor caret to its band
+	{
+		EdGotoBand(idx);
+
+		return;
+	}
+
 	const Annotation& a = S.anns[(size_t)idx];
 
 	ScrollToLine(a.start_line);
@@ -369,7 +429,7 @@ static void ShowAnnotationAt(int idx)
 
 static void GotoAnnotation(int step)
 {
-	if (!S.hasFile || S.anns.empty()) return;
+	if (E.active || !S.hasFile || S.anns.empty()) return;
 
 	int	n	= (int)S.anns.size();
 	int	idx	= S.annIdx;
@@ -444,6 +504,15 @@ static void GotoMatch(int idx)
 
 	const Match& m = S.matches[(size_t)S.matchIdx];
 
+	if (E.active)
+	{
+		gFindCount.stringValue = [NSString stringWithFormat:@"%d of %d", S.matchIdx + 1, n];
+
+		EdGotoLine(m.ln, m.col);
+
+		return;
+	}
+
 	ScrollToLine(m.ln);
 
 	NSRect	vis	= gCodeView.visibleRect;
@@ -461,7 +530,8 @@ static void GotoMatch(int idx)
 	[gCodeView setNeedsDisplay:YES];
 }
 
-static void FindRefresh()
+// jump=false (refresh after an edit) recounts without moving the caret
+static void FindRefresh(bool jump)
 {
 	std::string query = U8(gFindField.stringValue);
 
@@ -477,9 +547,15 @@ static void FindRefresh()
 
 	if (!wq.empty() && S.hasFile)
 	{
-		for (int row = 0; row < LineCount() && S.matches.size() < 2000; ++row)
+		std::vector<std::wstring>			edLines;
+
+		if (E.active) edLines = EdLines();
+
+		const std::vector<std::wstring>&	src	= E.active ? edLines : S.lines;
+
+		for (int row = 0; row < (int)src.size() && S.matches.size() < 2000; ++row)
 		{
-			std::wstring low = S.lines[(size_t)row];
+			std::wstring low = src[(size_t)row];
 
 			std::transform(low.begin(), low.end(), low.begin(), towlower);
 
@@ -498,9 +574,14 @@ static void FindRefresh()
 		}
 	}
 
-	if (!S.matches.empty())
+	if (!S.matches.empty() && jump)
 	{
 		GotoMatch(0);
+	}
+	else if (!S.matches.empty())
+	{
+		gFindCount.stringValue = [NSString stringWithFormat:@"%d match%@",
+			(int)S.matches.size(), S.matches.size() == 1 ? @"" : @"es"];
 	}
 	else
 	{
@@ -508,6 +589,8 @@ static void FindRefresh()
 
 		[gCodeView setNeedsDisplay:YES];
 	}
+
+	if (E.active) [(NSView*)gEditor setNeedsDisplay:YES];
 }
 
 static void FindNext() { if (!S.matches.empty()) GotoMatch(S.matchIdx + 1); }
@@ -546,6 +629,24 @@ static void OpenGotoBar()
 
 static void EscapeAction()
 {
+	if (E.active)
+	{
+		gFindBar.hidden = YES;
+		gGotoBar.hidden = YES;
+
+		S.matches.clear();
+
+		S.matchIdx = -1;
+
+		S.lastQuery.clear();
+
+		[(NSView*)gEditor setNeedsDisplay:YES];
+
+		[gWindow makeFirstResponder:(NSView*)gEditor];
+
+		return;
+	}
+
 	if (gFindBar.hidden && gGotoBar.hidden && !S.sel && S.matches.empty())
 		return;
 
@@ -571,6 +672,17 @@ static void GotoLineAction()
 	int ln = gGotoField.intValue;
 
 	if (!S.hasFile || ln <= 0) return;
+
+	if (E.active)
+	{
+		gGotoBar.hidden = YES;
+
+		EdGotoLine(std::min(ln, (int)E.lineStarts.size()));
+
+		[gWindow makeFirstResponder:(NSView*)gEditor];
+
+		return;
+	}
 
 	ln				= std::max(1, std::min(LineCount(), ln));
 	gGotoBar.hidden	= YES;
@@ -600,6 +712,8 @@ static void Zoom(int delta)
 	S.fontPt = pt;
 
 	MakeFonts();
+
+	if (E.active) EdOnZoom();
 
 	if (S.hasFile)
 	{
@@ -691,7 +805,7 @@ static void Persist()
 
 static void UndoDelete()
 {
-	if (!S.deletedAnn) return;
+	if (E.active || !S.deletedAnn) return;
 
 	auto& [path, ann] = *S.deletedAnn;
 
@@ -712,7 +826,7 @@ static void UndoDelete()
 
 static void PollSidecar()
 {
-	if (!S.hasFile || S.annError) return;
+	if (!S.hasFile || S.annError || E.active) return;
 
 	fs::path		sidecar = S.ws.sidecar_for(S.filePath);
 	std::error_code	ec;
@@ -886,6 +1000,8 @@ static void RefreshBadge(const fs::path& p)
 
 static void OpenFolder(const fs::path& folder)
 {
+	if (!EdExit()) return;				// user kept editing
+
 	S.ws.open(folder);
 
 	S.wsOpen					= true;
@@ -1297,13 +1413,14 @@ static void EditAnnotation(Annotation ann, bool isNew, int existingIdx)
 		@"Open a project folder, pick a code file, and see its\n"
 		@"annotations overlaid transparently on the source.\n\n"
 		@"Click or drag on the line numbers to add an annotation.\n"
-		@"Click an existing highlight to edit it.\n\n"
+		@"Click an existing highlight to edit it, or use ✎ Edit\n"
+		@"to change the source itself.\n\n"
 		@"Cmd+F finds text, Cmd+L jumps to a line, Cmd+C copies\n"
 		@"selected lines, Cmd+= / Cmd+- zoom the code,\n"
 		@"Option+Down/Option+Up jump between annotations.\n\n"
 		@"Notes are saved in a parallel tree that mirrors the\n"
 		@"source layout (default: <project>/.annotations),\n"
-		@"so the source files themselves are never touched.";
+		@"so annotating never touches the source files.";
 
 	NSDictionary* bodyAttrs = @{
 		NSFontAttributeName:			[NSFont systemFontOfSize:12],
@@ -1864,12 +1981,941 @@ static void EditAnnotation(Annotation ann, bool isNew, int existingIdx)
 
 @end
 
+// ---------------------------------------------------------------- edit mode
+//
+// "✎ Edit" swaps a real NSTextView in for the code view: native editing,
+// undo/redo and clipboard, syntax colors as layout-manager temporary
+// attributes (re-scanned incrementally, never part of the text or undo),
+// and annotation bands that ride along with the text. Mirrors EditorPane in
+// code_annotator.py.
+
+@interface EditorView : NSTextView <NSTextStorageDelegate, NSTextViewDelegate>
+@end
+
+@interface LineRuler : NSRulerView
+@end
+
+static NSDictionary* EdBaseAttrs()
+{
+	NSMutableParagraphStyle* ps = [NSMutableParagraphStyle new];
+
+	ps.tabStops				= @[];
+	ps.defaultTabInterval	= gCharW * core::TAB_WIDTH;
+	ps.minimumLineHeight	= gLineH;
+	ps.maximumLineHeight	= gLineH;
+
+	return @{
+		NSFontAttributeName:			gCodeFont,
+		NSForegroundColorAttributeName:	FG,
+		NSParagraphStyleAttributeName:	ps,
+		NSBaselineOffsetAttributeName:	@2,
+	};
+}
+
+static std::string U8Lossy(NSString* s)
+{
+	NSData* d = [s dataUsingEncoding:NSUTF8StringEncoding allowLossyConversion:YES];
+
+	return d ? std::string((const char*)d.bytes, d.length) : std::string();
+}
+
+static CGFloat EdGutterW()
+{
+	int digits = (int)std::to_string(std::max<size_t>(1, E.lineStarts.size())).size();
+
+	return kPad * 2 + std::max(2, digits) * gCharW;
+}
+
+// 0-based line containing UTF-16 offset off
+static int EdLineOf(NSUInteger off)
+{
+	auto it = std::upper_bound(E.lineStarts.begin(), E.lineStarts.end(), off);
+
+	return std::max(0, (int)(it - E.lineStarts.begin()) - 1);
+}
+
+static NSUInteger EdLineEnd(int ln, NSUInteger length)		// excludes the '\n'
+{
+	return ln + 1 < (int)E.lineStarts.size() ? E.lineStarts[(size_t)ln + 1] - 1 : length;
+}
+
+static void EdIndexLines(NSString* s)
+{
+	NSUInteger				n	= s.length;
+	std::vector<unichar>	buf(n);
+
+	[s getCharacters:buf.data() range:NSMakeRange(0, n)];
+
+	E.lineStarts.assign(1, 0);
+
+	for (NSUInteger i = 0; i < n; ++i)
+		if (buf[i] == '\n') E.lineStarts.push_back(i + 1);
+}
+
+// one line as wchar_t (UTF-32 here), plus the UTF-16 offset of each
+// character so token columns map back onto NSString ranges
+static std::wstring EdLineText(NSString* s, int ln, std::vector<NSUInteger>& offs)
+{
+	NSUInteger				a	= E.lineStarts[(size_t)ln];
+	NSUInteger				b	= EdLineEnd(ln, s.length);
+	std::vector<unichar>	u(b - a);
+	std::wstring			w;
+
+	[s getCharacters:u.data() range:NSMakeRange(a, b - a)];
+
+	offs.clear();
+
+	for (size_t i = 0; i < u.size(); ++i)
+	{
+		offs.push_back(i);
+
+		uint32_t c = u[i];
+
+		if (c >= 0xD800 && c <= 0xDBFF && i + 1 < u.size() &&
+			u[i + 1] >= 0xDC00 && u[i + 1] <= 0xDFFF)
+		{
+			c = 0x10000 + ((c - 0xD800) << 10) + (u[i + 1] - 0xDC00);
+			++i;
+		}
+
+		w += (wchar_t)c;
+	}
+
+	offs.push_back(u.size());
+
+	return w;
+}
+
+// UTF-16 offset of (0-based line, character column)
+static NSUInteger EdOffsetOf(int ln, int col)
+{
+	ln = std::max(0, std::min(ln, (int)E.lineStarts.size() - 1));
+
+	std::vector<NSUInteger> offs;
+
+	EdLineText(gEditor.string, ln, offs);
+
+	return E.lineStarts[(size_t)ln] + offs[(size_t)std::max(0, std::min(col, (int)offs.size() - 1))];
+}
+
+// the editor's text as lines, newlines normalized
+static std::vector<std::wstring> EdLines()
+{
+	return core::split_source_lines(core::utf8_to_wide(U8Lossy(gEditor.string)));
+}
+
+static bool SameScanState(const hl::ScanState& a, const hl::ScanState& b)
+{
+	return a.mode == b.mode && a.delim == b.delim;
+}
+
+static void EdHighlightLine(NSString* s, int ln, const hl::LangCfg* cfg, hl::ScanState& st)
+{
+	std::vector<NSUInteger>	offs;
+	std::wstring			w		= EdLineText(s, ln, offs);
+	NSUInteger				base	= E.lineStarts[(size_t)ln];
+	NSLayoutManager*		lm		= gEditor.layoutManager;
+
+	[lm removeTemporaryAttribute:NSForegroundColorAttributeName
+			   forCharacterRange:NSMakeRange(base, offs.back())];
+
+	if (!cfg) return;
+
+	auto toks = cfg->html ? hl::scan_html_line(w, st) : hl::scan_line(w, *cfg, st);
+
+	for (const auto& t : toks)
+	{
+		if (t.cls == hl::Tok::None) continue;
+
+		size_t c0 = std::min((size_t)t.col, offs.size() - 1);
+		size_t c1 = std::min((size_t)t.col + t.text.size(), offs.size() - 1);
+
+		[lm addTemporaryAttribute:NSForegroundColorAttributeName
+							value:TokColor(t.cls)
+				forCharacterRange:NSMakeRange(base + offs[c0], offs[c1] - offs[c0])];
+	}
+}
+
+// re-scan lines from..to, then keep going while the scanner state carried
+// into the following lines differs from what they were scanned with
+static void EdRehighlight(int from, int to)
+{
+	NSString*			s	= gEditor.string;
+	const hl::LangCfg*	cfg	= hl::lang_cfg(S.langId);
+	int					n	= (int)E.lineStarts.size();
+
+	from = std::max(0, std::min(from, n - 1));
+
+	hl::ScanState st = E.states[(size_t)from];
+
+	for (int i = from; i < n; ++i)
+	{
+		if (i > to && (!cfg || SameScanState(st, E.states[(size_t)i]))) break;
+
+		E.states[(size_t)i] = st;
+
+		EdHighlightLine(s, i, cfg, st);
+	}
+}
+
+// Bands follow the text like Tk tags: text typed at a band's edges stays
+// outside it, text typed inside it joins it, and a band whose whole region
+// is deleted collapses to a point that then behaves like a left-gravity
+// mark (the orphan position used on save). [a, b) was replaced; the new
+// text ends at e.
+static void EdShiftBands(NSUInteger a, NSUInteger b, NSUInteger e)
+{
+	auto past = [&](NSUInteger p) { return p - b + e; };
+
+	for (auto& bd : E.bands)
+	{
+		if (bd.start == bd.end)
+		{
+			NSUInteger p = bd.start;
+
+			if (p > b)			p = past(p);
+			else if (p >= a)	p = a;
+
+			bd.start = bd.end = p;
+
+			continue;
+		}
+
+		if (a < b && bd.start >= a && bd.end <= b)
+		{
+			bd.start = bd.end = a;				// whole region deleted
+
+			continue;
+		}
+
+		if (bd.start >= a)	bd.start	= bd.start >= b ? past(bd.start) : e;
+		if (bd.end > a)		bd.end		= bd.end > b ? past(bd.end) : a;
+
+		if (bd.end < bd.start) bd.end = bd.start;
+	}
+}
+
+static void EdUpdateTitle()
+{
+	if (!E.active) return;
+
+	std::string status = S.filePath.filename().string() + "  •  editing";
+
+	if (E.dirty) status += "  ●";
+
+	gStatusFile.stringValue = NSStr(status);
+}
+
+static void EdAfterChange()
+{
+	gRuler.ruleThickness = EdGutterW();
+
+	EdUpdateTitle();
+
+	if (!gFindBar.hidden) FindRefresh(false);
+
+	[gRuler setNeedsDisplay:YES];
+	[gEditor setNeedsDisplay:YES];
+}
+
+// text storage edit: [loc, loc + oldLen) became [loc, loc + newLen)
+static void EdOnEdit(NSString* s, NSUInteger loc, NSUInteger oldLen, NSUInteger newLen)
+{
+	NSUInteger	oldEnd	= loc + oldLen;
+	NSInteger	delta	= (NSInteger)newLen - (NSInteger)oldLen;
+
+	// line starts inside (loc, oldEnd] came from removed newlines
+	auto	lo		= std::upper_bound(E.lineStarts.begin(), E.lineStarts.end(), loc);
+	auto	hi		= std::upper_bound(E.lineStarts.begin(), E.lineStarts.end(), oldEnd);
+	size_t	idx		= (size_t)(lo - E.lineStarts.begin());
+	size_t	removed	= (size_t)(hi - lo);
+	int		first	= (int)idx - 1;
+
+	for (auto it = hi; it != E.lineStarts.end(); ++it)
+		*it = (NSUInteger)((NSInteger)*it + delta);
+
+	std::vector<NSUInteger>	added;
+	std::vector<unichar>	buf(newLen);
+
+	[s getCharacters:buf.data() range:NSMakeRange(loc, newLen)];
+
+	for (NSUInteger i = 0; i < newLen; ++i)
+		if (buf[i] == '\n') added.push_back(loc + i + 1);
+
+	E.lineStarts.erase(E.lineStarts.begin() + (ptrdiff_t)idx,
+					   E.lineStarts.begin() + (ptrdiff_t)(idx + removed));
+	E.lineStarts.insert(E.lineStarts.begin() + (ptrdiff_t)idx, added.begin(), added.end());
+
+	E.states.erase(E.states.begin() + (ptrdiff_t)idx,
+				   E.states.begin() + (ptrdiff_t)(idx + removed));
+	E.states.insert(E.states.begin() + (ptrdiff_t)idx, added.size(), hl::ScanState{});
+
+	EdShiftBands(loc, oldEnd, loc + newLen);
+
+	E.dirty = true;
+
+	// re-highlight once the layout manager has caught up with the edit
+	int hiLine = first + (int)added.size();
+
+	if (E.hlLo >= 0)
+	{
+		if (E.hlHi > first) E.hlHi += (int)added.size() - (int)removed;
+
+		E.hlLo = std::min(E.hlLo, first);
+		E.hlHi = std::max(E.hlHi, hiLine);
+	}
+	else
+	{
+		E.hlLo = first;
+		E.hlHi = hiLine;
+	}
+
+	if (!E.hlQueued)
+	{
+		E.hlQueued = true;
+
+		dispatch_async(dispatch_get_main_queue(), ^{
+			E.hlQueued = false;
+
+			if (!E.active || E.hlLo < 0) return;
+
+			int a = E.hlLo, b = E.hlHi;
+
+			E.hlLo = E.hlHi = -1;
+
+			EdRehighlight(a, b);
+			EdAfterChange();
+		});
+	}
+}
+
+// a line's fragment rect in editor coordinates
+static NSRect EdLineRect(int ln)
+{
+	NSLayoutManager*	lm	= gEditor.layoutManager;
+	NSUInteger			len	= gEditor.string.length;
+	NSUInteger			ci	= E.lineStarts[(size_t)std::max(0, std::min(ln, (int)E.lineStarts.size() - 1))];
+	NSRect				r;
+
+	if (ci >= len)			// the empty line after a trailing newline
+	{
+		r = lm.extraLineFragmentRect;
+
+		if (NSIsEmptyRect(r) && len > 0)
+		{
+			NSRect last = [lm lineFragmentRectForGlyphAtIndex:[lm glyphIndexForCharacterAtIndex:len - 1]
+											   effectiveRange:nil];
+
+			r = NSOffsetRect(last, 0, last.size.height);
+		}
+	}
+	else
+	{
+		r = [lm lineFragmentRectForGlyphAtIndex:[lm glyphIndexForCharacterAtIndex:ci]
+								 effectiveRange:nil];
+	}
+
+	NSPoint o = gEditor.textContainerOrigin;
+
+	return NSOffsetRect(r, o.x, o.y);
+}
+
+// --- views --------------------------------------------------------------------
+
+@implementation EditorView
+
+- (void)textStorage:(NSTextStorage*)ts
+	didProcessEditing:(NSTextStorageEditActions)mask
+				range:(NSRange)r
+	   changeInLength:(NSInteger)delta
+{
+	if (!(mask & NSTextStorageEditedCharacters) || E.loading || !E.active)
+		return;
+
+	EdOnEdit(ts.string, r.location, (NSUInteger)((NSInteger)r.length - delta), r.length);
+}
+
+- (NSUndoManager*)undoManagerForTextView:(NSTextView*)tv	{ return gEditUndo; }
+
+- (void)textViewDidChangeSelection:(NSNotification*)note	{ [gRuler setNeedsDisplay:YES]; }
+
+- (void)undo:(id)sender		{ [gEditUndo undo]; }
+- (void)redo:(id)sender		{ [gEditUndo redo]; }
+
+- (BOOL)validateMenuItem:(NSMenuItem*)item
+{
+	if (item.action == @selector(undo:)) return gEditUndo.canUndo;
+	if (item.action == @selector(redo:)) return gEditUndo.canRedo;
+
+	return [super validateMenuItem:item];
+}
+
+// pasted text may carry "\r\n"; the editor keeps '\n' only
+- (void)paste:(id)sender
+{
+	NSString* s = [NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];
+
+	if (!s.length) return;
+
+	s = [[s stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"]
+			stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
+
+	[self insertText:s replacementRange:self.selectedRange];
+}
+
+- (void)cancelOperation:(id)sender	{ EscapeAction(); }
+- (void)complete:(id)sender			{ EscapeAction(); }		// Esc in a text view
+
+- (void)scrollWheel:(NSEvent*)ev
+{
+	if (ev.modifierFlags & NSEventModifierFlagCommand)
+	{
+		Zoom(ev.scrollingDeltaY > 0 ? 1 : -1);
+
+		return;
+	}
+
+	[super scrollWheel:ev];
+}
+
+- (void)magnifyWithEvent:(NSEvent*)ev
+{
+	Zoom(ev.magnification > 0 ? 1 : -1);
+}
+
+// full-width annotation bands and find matches, under the text
+- (void)drawViewBackgroundInRect:(NSRect)rect
+{
+	[super drawViewBackgroundInRect:rect];
+
+	if (!E.active) return;
+
+	double	alpha	= S.opacity / 100.0;
+	CGFloat	width	= std::max(self.bounds.size.width, NSMaxX(rect));
+
+	if (S.showAnns)
+	{
+		for (size_t i = 0; i < E.bands.size() && i < S.anns.size(); ++i)
+		{
+			const Annotation&	a	= S.anns[i];
+			const EdBand&		bd	= E.bands[i];
+
+			if (!S.visColors.count(a.color) || bd.start == bd.end) continue;
+
+			int lo = EdLineOf(bd.start);
+			int el = EdLineOf(bd.end);
+			int hi = std::max(lo, bd.end == E.lineStarts[(size_t)el] ? el - 1 : el);
+
+			NSRect r0	= EdLineRect(lo);
+			NSRect r1	= EdLineRect(hi);
+			NSRect band	= NSMakeRect(0, NSMinY(r0), width, NSMaxY(r1) - NSMinY(r0));
+
+			if (!NSIntersectsRect(band, rect)) continue;
+
+			const core::AnnColor* c = core::ann_color(a.color);
+
+			if (!c) c = &core::ANN_COLORS[0];
+
+			[BlendBG(BG, c->r, c->g, c->b, alpha * (a.orphaned ? 0.18 : 0.45)) setFill];
+
+			NSRectFill(band);
+
+			[BlendBG(BG, c->r, c->g, c->b, std::min(1.0, alpha * 1.5)) setFill];
+
+			NSRectFill(NSMakeRect(0, band.origin.y, 3, band.size.height));
+		}
+	}
+
+	NSLayoutManager* lm = self.layoutManager;
+
+	for (int i = 0; i < (int)S.matches.size(); ++i)
+	{
+		const Match&	m	= S.matches[(size_t)i];
+		NSUInteger		a	= EdOffsetOf(m.ln - 1, m.col);
+		NSUInteger		b	= EdOffsetOf(m.ln - 1, m.col + m.len);
+		NSRange			gr	= [lm glyphRangeForCharacterRange:NSMakeRange(a, b - a)
+											 actualCharacterRange:nil];
+		NSRect			r	= [lm boundingRectForGlyphRange:gr inTextContainer:self.textContainer];
+		NSPoint			o	= self.textContainerOrigin;
+
+		r = NSOffsetRect(r, o.x, o.y);
+
+		if (!NSIntersectsRect(r, rect)) continue;
+
+		[BlendBG(BG, 210, 170, 60, i == S.matchIdx ? 0.55 : 0.25) setFill];
+
+		NSRectFill(r);
+	}
+}
+
+@end
+
+@implementation LineRuler
+
+- (BOOL)isFlipped					{ return YES; }
+- (CGFloat)requiredThickness		{ return EdGutterW(); }
+
+- (void)drawRect:(NSRect)dirty
+{
+	[BG setFill];
+
+	NSRectFill(dirty);
+
+	if (!E.active || E.lineStarts.empty()) return;
+
+	NSLayoutManager*	lm		= gEditor.layoutManager;
+	NSRect				vis		= gEditor.visibleRect;
+	NSRange				gr		= [lm glyphRangeForBoundingRect:vis
+											  inTextContainer:gEditor.textContainer];
+	NSRange				cr		= [lm characterRangeForGlyphRange:gr actualGlyphRange:nil];
+	int					caretLn	= EdLineOf(gEditor.selectedRange.location);
+	CGFloat				w		= self.ruleThickness;
+	int					n		= (int)E.lineStarts.size();
+
+	for (int ln = EdLineOf(cr.location);
+		 ln < n && E.lineStarts[(size_t)ln] <= NSMaxRange(cr);
+		 ++ln)
+	{
+		NSRect		lr		= EdLineRect(ln);
+		CGFloat		y		= [self convertPoint:NSMakePoint(0, lr.origin.y) fromView:gEditor].y;
+		NSString*	num		= [NSString stringWithFormat:@"%d", ln + 1];
+		NSDictionary* attrs	= @{
+			NSFontAttributeName:			gCodeFont,
+			NSForegroundColorAttributeName:	ln == caretLn ? FG : GUTTER_FG,
+		};
+		NSSize		sz		= [num sizeWithAttributes:attrs];
+
+		[num drawAtPoint:NSMakePoint(w - kPad - sz.width, y + 2) withAttributes:attrs];
+	}
+}
+
+@end
+
+// --- entering / leaving / saving ---------------------------------------------
+
+static void EdHideBars()
+{
+	gFindBar.hidden = YES;
+	gGotoBar.hidden = YES;
+
+	S.matches.clear();
+
+	S.matchIdx = -1;
+
+	S.lastQuery.clear();
+}
+
+static void EdShowRange(NSUInteger off)
+{
+	[gEditor setSelectedRange:NSMakeRange(off, 0)];
+	[gEditor scrollRangeToVisible:NSMakeRange(off, 0)];
+	[gRuler setNeedsDisplay:YES];
+	[gEditor setNeedsDisplay:YES];
+}
+
+static void EdGotoLine(int ln, int col)
+{
+	if (!E.active) return;
+
+	EdShowRange(EdOffsetOf(ln - 1, col));
+}
+
+static void EdGotoBand(int idx)
+{
+	if (!E.active || idx < 0 || idx >= (int)E.bands.size()) return;
+
+	EdShowRange(E.bands[(size_t)idx].start);
+}
+
+static void EdEnter()
+{
+	if (E.active) return;
+
+	if (!S.hasFile)
+	{
+		FlashStatus("Open a file first");
+
+		return;
+	}
+
+	if (S.truncated)
+	{
+		FlashStatus("File is truncated in this view — too large to edit here");
+
+		return;
+	}
+
+	core::EditSource src = core::load_source_for_edit(S.filePath);
+
+	if (src.status == core::EditSource::Unreadable)
+	{
+		FlashStatus("Could not read file: " + S.filePath.filename().string());
+
+		return;
+	}
+
+	if (src.status == core::EditSource::NotUtf8)
+	{
+		FlashStatus("File is not valid UTF-8 — editing disabled");
+
+		return;
+	}
+
+	EdHideBars();
+
+	S.sel.reset();
+	S.pending.reset();
+
+	std::error_code ec;
+	auto			t	= fs::last_write_time(S.filePath, ec);
+
+	E.mtime	= ec ? std::nullopt : std::optional(t);
+	E.crlf	= src.crlf;
+	E.bom	= src.bom;
+
+	std::wstring joined;
+
+	for (size_t i = 0; i < src.lines.size(); ++i)
+	{
+		if (i) joined += L'\n';
+
+		joined += src.lines[i];
+	}
+
+	NSString*	text	= NSStrW(joined);
+	CGFloat		topY	= gCodeView.visibleRect.origin.y;
+
+	E.loading = true;
+
+	[gEditor.textStorage setAttributedString:
+		[[NSAttributedString alloc] initWithString:text attributes:EdBaseAttrs()]];
+
+	E.loading = false;
+
+	gEditor.typingAttributes = EdBaseAttrs();
+
+	[gEditUndo removeAllActions];
+
+	EdIndexLines(text);
+
+	int n = (int)E.lineStarts.size();
+
+	E.states.assign((size_t)n, hl::ScanState{});
+	E.bands.clear();
+
+	for (const auto& a : S.anns)
+	{
+		int		lo	= std::min(a.start_line, n) - 1;
+		int		hi	= std::min(a.end_line, n);			// next line, 0-based
+		EdBand	bd;
+
+		bd.start	= E.lineStarts[(size_t)std::max(0, lo)];
+		bd.end		= hi < n ? E.lineStarts[(size_t)hi] : text.length;
+
+		E.bands.push_back(bd);
+	}
+
+	E.active	= true;
+	E.dirty		= false;
+	E.hlLo		= -1;
+	E.hlHi		= -1;
+
+	EdRehighlight(0, n - 1);
+
+	gCodeScroll.hidden		= YES;
+	gEditScroll.hidden		= NO;
+	gEditor.minSize			= gEditScroll.contentView.bounds.size;
+	gRuler.ruleThickness	= EdGutterW();
+	gEditBtn.title			= @"✓ Done";
+	gSaveBtn.hidden			= NO;
+
+	// open at the spot the annotate view was showing
+	int top = std::max(0, std::min(n - 1, (int)ceil(topY / gLineH)));
+
+	[gEditor setSelectedRange:NSMakeRange(E.lineStarts[(size_t)top], 0)];
+	[gEditor scrollPoint:NSMakePoint(0, topY)];
+	[gWindow makeFirstResponder:gEditor];
+
+	EdUpdateTitle();
+	DefaultHint();
+
+	[gRuler setNeedsDisplay:YES];
+}
+
+// re-anchor annotations from their bands, then persist any changes
+static void EdSyncAnnotations()
+{
+	std::vector<std::wstring>	lines	= EdLines();
+	bool						changed	= false;
+
+	for (size_t i = 0; i < S.anns.size() && i < E.bands.size(); ++i)
+	{
+		const EdBand&	bd	= E.bands[i];
+		int				sl	= EdLineOf(bd.start);
+		int				el	= EdLineOf(bd.end);
+
+		changed |= core::rebase_annotation(
+			S.anns[i],
+			sl,
+			el,
+			(int)(bd.end - E.lineStarts[(size_t)el]),
+			bd.start == bd.end,
+			lines);
+	}
+
+	if (!changed) return;
+
+	// keep the bands parallel to the (re-sorted) annotations
+	std::vector<std::pair<Annotation, EdBand>> pairs;
+
+	for (size_t i = 0; i < S.anns.size(); ++i)
+		pairs.push_back({S.anns[i], i < E.bands.size() ? E.bands[i] : EdBand{}});
+
+	std::stable_sort(
+		pairs.begin(),
+		pairs.end(),
+		[](const auto& x, const auto& y) { return x.first.start_line < y.first.start_line; });
+
+	for (size_t i = 0; i < pairs.size(); ++i)
+	{
+		S.anns[i] = pairs[i].first;
+
+		if (i < E.bands.size()) E.bands[i] = pairs[i].second;
+	}
+
+	Persist();
+}
+
+static bool EdSave()
+{
+	if (!E.active) return false;
+
+	NSString*		name	= NSStr(S.filePath.filename().string());
+	std::error_code	ec;
+	auto			onDisk	= fs::last_write_time(S.filePath, ec);
+
+	if (!ec && E.mtime && onDisk != *E.mtime)
+	{
+		NSAlert* a = [NSAlert new];
+
+		a.messageText		= @"File changed on disk";
+		a.informativeText	= [NSString stringWithFormat:
+			@"%@ was modified outside the editor.\n\nOverwrite it with your version?", name];
+
+		[a addButtonWithTitle:@"Overwrite"];
+		[a addButtonWithTitle:@"Cancel"];
+
+		if ([a runModal] != NSAlertFirstButtonReturn) return false;
+	}
+
+	// atomic save (temp file + rename), so a crash mid-save can't destroy
+	// the source file
+	if (!core::write_file_atomic(S.filePath, core::join_source(EdLines(), E.crlf, E.bom)))
+	{
+		NSAlert* a = [NSAlert new];
+
+		a.messageText		= @"Save failed";
+		a.informativeText	= [NSString stringWithFormat:
+			@"Could not write the source file:\n%@", NSStr(S.filePath.string())];
+
+		[a runModal];
+
+		return false;
+	}
+
+	auto t = fs::last_write_time(S.filePath, ec);
+
+	E.mtime = ec ? std::nullopt : std::optional(t);
+
+	EdSyncAnnotations();
+
+	E.dirty = false;
+
+	EdUpdateTitle();
+	FlashStatus("Saved " + S.filePath.filename().string());
+
+	[gEditor setNeedsDisplay:YES];
+
+	return true;
+}
+
+// leave edit mode; false if the user cancelled (or a requested save failed)
+static bool EdExit()
+{
+	if (!E.active) return true;
+
+	if (E.dirty)
+	{
+		NSAlert* a = [NSAlert new];
+
+		a.messageText		= [NSString stringWithFormat:@"Save changes to %@?",
+								  NSStr(S.filePath.filename().string())];
+		a.informativeText	= @"Your changes will be lost if you don't save them.";
+
+		[a addButtonWithTitle:@"Save"];
+		[a addButtonWithTitle:@"Cancel"];
+		[a addButtonWithTitle:@"Don't Save"];
+
+		NSModalResponse r = [a runModal];
+
+		if (r == NSAlertSecondButtonReturn) return false;
+
+		if (r == NSAlertFirstButtonReturn && !EdSave()) return false;
+	}
+
+	CGFloat topY = gEditor.visibleRect.origin.y;
+
+	EdHideBars();
+
+	E.active = false;
+
+	E.lineStarts.clear();
+	E.states.clear();
+	E.bands.clear();
+
+	E.loading = true;
+
+	[gEditor.textStorage setAttributedString:[NSAttributedString new]];
+
+	E.loading = false;
+
+	[gEditUndo removeAllActions];
+
+	gEditScroll.hidden	= YES;
+	gCodeScroll.hidden	= NO;
+	gEditBtn.title		= @"✎ Edit";
+	gSaveBtn.hidden		= YES;
+
+	fs::path path = S.filePath;
+
+	OpenFile(path);						// re-render the (possibly new) source
+
+	[gCodeView scrollPoint:NSMakePoint(0, topY)];
+	[gWindow makeFirstResponder:gCodeView];
+
+	return true;
+}
+
+static void EdToggle()
+{
+	if (E.active)	EdExit();
+	else			EdEnter();
+}
+
+static void EdOnZoom()
+{
+	NSTextStorage* ts = gEditor.textStorage;
+
+	// attribute-only change: not an edit, not undoable
+	[ts addAttributes:EdBaseAttrs() range:NSMakeRange(0, ts.length)];
+
+	gEditor.typingAttributes	= EdBaseAttrs();
+	gRuler.ruleThickness		= EdGutterW();
+
+	[gRuler setNeedsDisplay:YES];
+	[gEditor setNeedsDisplay:YES];
+}
+
+static void EdBuildViews(NSRect frame)
+{
+	gEditScroll = [[NSScrollView alloc] initWithFrame:frame];
+
+	gEditScroll.hasVerticalScroller		= YES;
+	gEditScroll.hasHorizontalScroller	= YES;
+	gEditScroll.backgroundColor			= BG;
+	gEditScroll.autoresizingMask		= NSViewWidthSizable | NSViewHeightSizable;
+	gEditScroll.hidden					= YES;
+
+	// TextKit 1 stack, built explicitly: no wrapping, and the layout manager
+	// carries the syntax colors as temporary attributes
+	gEditStorage = [NSTextStorage new];
+
+	NSLayoutManager*	lm	= [NSLayoutManager new];
+	NSTextContainer*	tc	= [[NSTextContainer alloc]
+		initWithContainerSize:NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX)];
+
+	tc.widthTracksTextView			= NO;
+	tc.heightTracksTextView			= NO;
+	lm.allowsNonContiguousLayout	= YES;
+
+	[gEditStorage addLayoutManager:lm];
+	[lm addTextContainer:tc];
+
+	gEditor = [[EditorView alloc] initWithFrame:NSMakeRect(0, 0, frame.size.width, frame.size.height)
+								  textContainer:tc];
+
+	gEditor.minSize							= NSMakeSize(0, 0);
+	gEditor.maxSize							= NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX);
+	gEditor.verticallyResizable				= YES;
+	gEditor.horizontallyResizable			= YES;
+	gEditor.autoresizingMask				= NSViewWidthSizable;
+	gEditor.textContainerInset				= NSMakeSize(4, kPad);
+	gEditor.richText						= NO;
+	gEditor.importsGraphics					= NO;
+	gEditor.allowsUndo						= YES;
+	gEditor.usesFindBar						= NO;
+	gEditor.smartInsertDeleteEnabled		= NO;
+	gEditor.automaticQuoteSubstitutionEnabled	= NO;
+	gEditor.automaticDashSubstitutionEnabled	= NO;
+	gEditor.automaticTextReplacementEnabled		= NO;
+	gEditor.automaticSpellingCorrectionEnabled	= NO;
+	gEditor.continuousSpellCheckingEnabled		= NO;
+	gEditor.grammarCheckingEnabled				= NO;
+	gEditor.automaticLinkDetectionEnabled		= NO;
+	gEditor.enabledTextCheckingTypes			= 0;
+	gEditor.backgroundColor					= BG;
+	gEditor.drawsBackground					= YES;
+	gEditor.insertionPointColor				= FG;
+	gEditor.selectedTextAttributes			= @{
+		NSBackgroundColorAttributeName: Col(0x26, 0x4f, 0x78)};
+	gEditor.typingAttributes				= EdBaseAttrs();
+	gEditor.delegate						= gEditor;
+	gEditStorage.delegate					= gEditor;
+
+	gEditUndo = [NSUndoManager new];
+
+	gEditScroll.documentView = gEditor;
+
+	gRuler = [[LineRuler alloc] initWithScrollView:gEditScroll
+									   orientation:NSVerticalRuler];
+
+	gRuler.clientView				= gEditor;
+	gRuler.ruleThickness			= EdGutterW();
+	gEditScroll.verticalRulerView	= gRuler;
+	gEditScroll.hasVerticalRuler	= YES;
+	gEditScroll.rulersVisible		= YES;
+
+	gEditScroll.contentView.postsBoundsChangedNotifications	= YES;
+	gEditScroll.contentView.postsFrameChangedNotifications	= YES;
+
+	[NSNotificationCenter.defaultCenter
+		addObserverForName:NSViewBoundsDidChangeNotification
+					object:gEditScroll.contentView
+					 queue:nil
+				usingBlock:^(NSNotification*)
+				{
+					[gRuler setNeedsDisplay:YES];
+				}
+	];
+
+	// at least as large as the visible area, so bands span the whole pane
+	[NSNotificationCenter.defaultCenter
+		addObserverForName:NSViewFrameDidChangeNotification
+					object:gEditScroll.contentView
+					 queue:nil
+				usingBlock:^(NSNotification*)
+				{
+					gEditor.minSize = gEditScroll.contentView.bounds.size;
+				}
+	];
+}
+
 // ------------------------------------------------------------ app delegate
 
 @interface AppDelegate
 	: NSObject <NSApplicationDelegate, NSOutlineViewDataSource,
 				NSOutlineViewDelegate, NSTableViewDataSource,
-				NSTableViewDelegate, NSTextFieldDelegate>
+				NSTableViewDelegate, NSTextFieldDelegate, NSWindowDelegate>
 @property(strong) NSString* startFolder;
 @end
 
@@ -1929,6 +2975,21 @@ static void EditAnnotation(Annotation ann, bool isNew, int existingIdx)
 		node.name;
 
 	return tf;
+}
+
+// leaving the editor (and its unsaved-changes prompt) comes before
+// switching files; refusing the selection keeps the editor open
+- (BOOL)outlineView:(NSOutlineView*)ov shouldSelectItem:(id)item
+{
+	TreeNode* node = item;
+
+	if (E.active && node && !node.isDir &&
+		fs::path(U8(node.path)) != S.filePath)
+	{
+		return EdExit();
+	}
+
+	return YES;
 }
 
 - (void)outlineViewSelectionDidChange:(NSNotification*)note
@@ -2085,6 +3146,32 @@ static void EditAnnotation(Annotation ann, bool isNew, int existingIdx)
 - (void)nextAnn:(id)sender		{ GotoAnnotation(1); }
 - (void)prevAnn:(id)sender		{ GotoAnnotation(-1); }
 - (void)closeFind:(id)sender	{ EscapeAction(); }
+- (void)toggleEdit:(id)sender	{ EdToggle(); }
+- (void)saveSource:(id)sender	{ EdSave(); }
+
+- (BOOL)validateMenuItem:(NSMenuItem*)item
+{
+	if (item.action == @selector(toggleEdit:))
+	{
+		item.title = E.active ? @"Done Editing" : @"Edit Source";
+
+		return S.hasFile;
+	}
+
+	if (item.action == @selector(saveSource:)) return E.active;
+
+	return YES;
+}
+
+- (BOOL)windowShouldClose:(NSWindow*)sender
+{
+	return EdExit();
+}
+
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)app
+{
+	return EdExit() ? NSTerminateNow : NSTerminateCancel;
+}
 
 - (void)toggleAnns:(id)sender
 {
@@ -2228,6 +3315,14 @@ static void EditAnnotation(Annotation ann, bool isNew, int existingIdx)
 	[[fileMenu addItemWithTitle:@"Open Folder…" action:@selector(pickFolder:)
 				  keyEquivalent:@"o"] setTarget:self];
 
+	[fileMenu addItem:[NSMenuItem separatorItem]];
+
+	[[fileMenu addItemWithTitle:@"Edit Source" action:@selector(toggleEdit:)
+				  keyEquivalent:@"e"] setTarget:self];
+
+	[[fileMenu addItemWithTitle:@"Save" action:@selector(saveSource:)
+				  keyEquivalent:@"s"] setTarget:self];
+
 	fileItem.submenu = fileMenu;
 
 	NSMenuItem*	editItem	= [bar addItemWithTitle:@"Edit" action:nil
@@ -2237,8 +3332,24 @@ static void EditAnnotation(Annotation ann, bool isNew, int existingIdx)
 	[editMenu addItemWithTitle:@"Undo" action:@selector(undo:)
 				 keyEquivalent:@"z"];
 
+	NSMenuItem* redo = [editMenu addItemWithTitle:@"Redo" action:@selector(redo:)
+									keyEquivalent:@"Z"];
+
+	redo.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+
+	[editMenu addItem:[NSMenuItem separatorItem]];
+
+	[editMenu addItemWithTitle:@"Cut" action:@selector(cut:)
+				 keyEquivalent:@"x"];
+
 	[editMenu addItemWithTitle:@"Copy" action:@selector(copy:)
 				 keyEquivalent:@"c"];
+
+	[editMenu addItemWithTitle:@"Paste" action:@selector(paste:)
+				 keyEquivalent:@"v"];
+
+	[editMenu addItemWithTitle:@"Select All" action:@selector(selectAll:)
+				 keyEquivalent:@"a"];
 
 	editItem.submenu = editMenu;
 
@@ -2396,6 +3507,7 @@ static void EditAnnotation(Annotation ann, bool isNew, int existingIdx)
 
 	gWindow.title				= @"Code Annotator";
 	gWindow.releasedWhenClosed	= NO;
+	gWindow.delegate			= self;
 
 	if (@available(macOS 10.14, *))
 		gWindow.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
@@ -2420,9 +3532,22 @@ static void EditAnnotation(Annotation ann, bool isNew, int existingIdx)
 
 	[toolbar addSubview:open];
 
+	gEditBtn		= [NSButton buttonWithTitle:@"✎ Edit" target:self
+										 action:@selector(toggleEdit:)];
+	gEditBtn.frame	= NSMakeRect(132, 5, 84, 28);
+
+	[toolbar addSubview:gEditBtn];
+
+	gSaveBtn		= [NSButton buttonWithTitle:@"Save" target:self
+										 action:@selector(saveSource:)];
+	gSaveBtn.frame	= NSMakeRect(218, 5, 70, 28);
+	gSaveBtn.hidden	= YES;					// shown only while editing
+
+	[toolbar addSubview:gSaveBtn];
+
 	gFolderLabel					= [NSTextField labelWithString:@"No folder open"];
 
-	gFolderLabel.frame				= NSMakeRect(140, 9, cb.size.width - 640, 20);
+	gFolderLabel.frame				= NSMakeRect(296, 9, cb.size.width - 796, 20);
 	gFolderLabel.autoresizingMask	= NSViewWidthSizable;
 	gFolderLabel.font				= [NSFont systemFontOfSize:12];
 	gFolderLabel.textColor			= FG_DIM;
@@ -2590,9 +3715,12 @@ static void EditAnnotation(Annotation ann, bool isNew, int existingIdx)
 	[left addSubview:treeScroll];
 	[split addSubview:left];
 
-	gCodeScroll						= [[NSScrollView alloc]
+	NSView* codePane				= [[NSView alloc]
 		initWithFrame:NSMakeRect(0, 0, 800, split.frame.size.height)];
 
+	gCodeScroll						= [[NSScrollView alloc] initWithFrame:codePane.bounds];
+
+	gCodeScroll.autoresizingMask		= NSViewWidthSizable | NSViewHeightSizable;
 	gCodeScroll.hasVerticalScroller		= YES;
 	gCodeScroll.hasHorizontalScroller	= YES;
 	gCodeScroll.backgroundColor			= BG;
@@ -2612,7 +3740,11 @@ static void EditAnnotation(Annotation ann, bool isNew, int existingIdx)
 				}
 	];
 
-	[split addSubview:gCodeScroll];
+	EdBuildViews(codePane.bounds);
+
+	[codePane addSubview:gCodeScroll];
+	[codePane addSubview:gEditScroll];
+	[split addSubview:codePane];
 	[content addSubview:split];
 	[split setPosition:300 ofDividerAtIndex:0];
 

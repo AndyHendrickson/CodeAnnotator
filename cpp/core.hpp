@@ -102,6 +102,46 @@ std::pair<int, int> reconcile_annotations(
 
 void sort_annotations(std::vector<Annotation>& anns);
 
+// --------------------------------------------------------------- edit mode
+
+bool is_valid_utf8(const std::string& bytes);
+
+// the source as the in-app editor sees it: strict UTF-8, newlines
+// normalized to '\n' and split into raw lines (tabs kept). Joining the
+// lines with '\n' reproduces the text, so a trailing newline shows up as a
+// final empty line.
+struct EditSource
+{
+	enum Status { Ok, Unreadable, NotUtf8 };
+
+	Status						status	= Ok;
+	std::vector<std::wstring>	lines;
+	bool						crlf	= false;	// file used "\r\n" newlines
+	bool						bom		= false;	// file began with a UTF-8 BOM
+};
+
+EditSource load_source_for_edit(const fs::path& p);
+
+// split text on "\r\n", "\r" or "\n" into raw lines (always at least one)
+std::vector<std::wstring> split_source_lines(const std::wstring& text);
+
+// inverse of load_source_for_edit: re-applies the newline style and BOM
+std::string join_source(const std::vector<std::wstring>& lines, bool crlf, bool bom);
+
+// re-anchor an annotation from its region as tracked through in-app edits.
+// The region now spans the half-open range from (start_line0, 0) to
+// (end_line0, end_col), 0-based; empty means the whole region was deleted,
+// which collapses the annotation to start_line0 and orphans it. Returns
+// true if anything changed.
+bool rebase_annotation(
+	Annotation&							a,
+	int									start_line0,
+	int									end_line0,
+	int									end_col,
+	bool								empty,
+	const std::vector<std::wstring>&	lines
+);
+
 // --------------------------------------------------------------- workspace
 
 struct Workspace

@@ -10,6 +10,7 @@
 #include <fstream>
 #include <random>
 #include <sstream>
+#include <string_view>
 
 namespace core {
 
@@ -844,6 +845,174 @@ int check_annotations(const fs::path& folder, bool fix, const fs::path* ann_root
 	if (problems == 0) return 0;
 
 	return (!fix || unfixable) ? 1 : 0;
+}
+
+// ---------------------------------------------------------------- edit mode
+
+bool is_valid_utf8(const std::string& s)
+{
+	size_t i = 0;
+
+	while (i < s.size())
+	{
+		unsigned char	c	= (unsigned char)s[i];
+		int				len;
+		uint32_t		cp;
+
+		if (c < 0x80)					{ ++i; continue; }
+		else if ((c & 0xE0) == 0xC0)	{ len = 2; cp = c & 0x1F; }
+		else if ((c & 0xF0) == 0xE0)	{ len = 3; cp = c & 0x0F; }
+		else if ((c & 0xF8) == 0xF0)	{ len = 4; cp = c & 0x07; }
+		else							return false;
+
+		if (i + (size_t)len > s.size()) return false;
+
+		for (int k = 1; k < len; ++k)
+		{
+			unsigned char cc = (unsigned char)s[i + (size_t)k];
+
+			if ((cc & 0xC0) != 0x80) return false;
+
+			cp = (cp << 6) | (cc & 0x3F);
+		}
+
+		// reject overlong forms, surrogates, and out-of-range code points,
+		// exactly like Python's strict utf-8 codec
+		static const uint32_t min_cp[] = {0, 0, 0x80, 0x800, 0x10000};
+
+		if (cp < min_cp[len] || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+			return false;
+
+		i += (size_t)len;
+	}
+
+	return true;
+}
+
+EditSource load_source_for_edit(const fs::path& p)
+{
+	EditSource	src;
+	auto		bytes	= read_file_bytes(p);
+
+	if (!bytes)
+	{
+		src.status = EditSource::Unreadable;
+
+		return src;
+	}
+
+	if (!is_valid_utf8(*bytes))
+	{
+		src.status = EditSource::NotUtf8;
+
+		return src;
+	}
+
+	std::string_view body = *bytes;
+
+	if (body.size() >= 3 && body.compare(0, 3, "\xEF\xBB\xBF") == 0)
+	{
+		src.bom = true;
+
+		body.remove_prefix(3);
+	}
+
+	src.crlf = body.find("\r\n") != std::string_view::npos;
+
+	src.lines = split_source_lines(utf8_to_wide(std::string(body)));
+
+	return src;
+}
+
+std::vector<std::wstring> split_source_lines(const std::wstring& text)
+{
+	std::vector<std::wstring>	lines;
+	std::wstring				cur;
+
+	for (size_t i = 0; i < text.size(); ++i)
+	{
+		wchar_t c = text[i];
+
+		if (c == L'\r' || c == L'\n')
+		{
+			if (c == L'\r' && i + 1 < text.size() && text[i + 1] == L'\n')
+				++i;
+
+			lines.push_back(std::move(cur));
+			cur.clear();
+		}
+		else
+		{
+			cur += c;
+		}
+	}
+
+	lines.push_back(std::move(cur));
+
+	return lines;
+}
+
+std::string join_source(const std::vector<std::wstring>& lines, bool crlf, bool bom)
+{
+	std::string out = bom ? "\xEF\xBB\xBF" : "";
+
+	for (size_t i = 0; i < lines.size(); ++i)
+	{
+		if (i) out += crlf ? "\r\n" : "\n";
+
+		out += wide_to_utf8(lines[i]);
+	}
+
+	return out;
+}
+
+bool rebase_annotation(
+	Annotation&							a,
+	int									start_line0,
+	int									end_line0,
+	int									end_col,
+	bool								empty,
+	const std::vector<std::wstring>&	lines)
+{
+	// the empty "line" after a trailing newline isn't shown by the viewer
+	int total = (int)lines.size();
+
+	if (total > 1 && lines.back().empty()) --total;
+
+	total = std::max(1, total);
+
+	if (empty)
+	{
+		int ln = std::max(1, std::min(start_line0 + 1, total));
+
+		if (a.start_line == ln && a.end_line == ln && a.orphaned)
+			return false;
+
+		a.start_line	= ln;
+		a.end_line		= ln;
+		a.orphaned		= true;
+
+		return true;
+	}
+
+	int start	= std::max(1, std::min(start_line0 + 1, total));
+	int end		= end_line0 + 1;
+
+	if (end_col == 0) --end;			// region ends at a line start: exclusive
+
+	end = std::max(start, std::min(end, total));
+
+	std::string anchor =
+		(size_t)start <= lines.size() ? anchor_text(lines[(size_t)start - 1]) : "";
+
+	if (a.start_line == start && a.end_line == end && a.anchor == anchor)
+		return false;
+
+	a.start_line	= start;
+	a.end_line		= end;
+	a.anchor		= anchor;
+
+	return true;
 }
 
 }  // namespace core

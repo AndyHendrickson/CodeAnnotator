@@ -44,10 +44,18 @@ freely on one project.
 | Zoom | `Cmd+=` / `Cmd+-` / `Cmd+0`, `Cmd+scroll`, pinch |
 | Next / previous annotation | `Option+Down` / `Option+Up` |
 | Dismiss find/selection | `Esc` |
+| Edit source / Done | `Cmd+E` (or *✎ Edit* in the toolbar) |
+| Save source (while editing) | `Cmd+S` |
+| Undo / redo (while editing) | `Cmd+Z` / `Shift+Cmd+Z` |
 
 Annotating works like the other ports: click or drag on the line numbers,
 then write a note and pick a color; click an existing highlight (or its
 note) to edit or delete it.
 
-Like the Windows port, the in-app source editor and "insert note as
-comment" are not included — this port never modifies source files.
+*✎ Edit* swaps in a native text editor (`NSTextView`) over the same file,
+with syntax colors, undo/redo, and the usual clipboard keys; annotation
+bands ride along with the text and their line positions are saved with the
+file, exactly like the Python and Windows editors. Editing requires valid
+UTF-8 (BOM and newline style are preserved); *✓ Done*, switching files, and
+quitting prompt about unsaved changes. Like the Windows port, "insert note
+as comment" is not included.

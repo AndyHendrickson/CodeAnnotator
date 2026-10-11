@@ -7,8 +7,8 @@
 // Usage:  code_annotator.exe [folder] [-a ANN_ROOT]
 //		   code_annotator.exe [folder] --check [--fix]		(no GUI)
 //
-// Compared with the Python original, the in-app source editor ("Edit mode")
-// and "insert note as comment" are not ported; everything else is.
+// Compared with the Python original, "insert note as comment" is not
+// ported; everything else is, including the in-app source editor.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -17,8 +17,11 @@
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shobjidl.h>
+#include <imm.h>
 
 #include <algorithm>
+#include <climits>
+#include <cmath>
 #include <cwctype>
 #include <map>
 #include <memory>
@@ -36,6 +39,7 @@
 #pragma comment(lib, "comctl32")
 #pragma comment(lib, "shell32")
 #pragma comment(lib, "ole32")
+#pragma comment(lib, "imm32")
 #pragma comment(linker, "\"/manifestdependency:type='win32' \
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -177,6 +181,8 @@ struct App {
 	bool			sliderDrag	= false;
 	bool			splitDrag	= false;
 	RECT			rOpen{};
+	RECT			rEdit{};
+	RECT			rSave{};			// empty unless editing
 	RECT			rSlider{};
 	RECT			rCheck{};
 	RECT			rChips[core::ANN_COLOR_COUNT]{};
@@ -192,6 +198,76 @@ struct App {
 };
 
 static App g;
+
+// --------------------------------------------------------- edit mode state
+
+struct EdPos
+{
+	int ln	= 0;		// 0-based line
+	int col	= 0;		// UTF-16 column in the raw (unexpanded) line
+};
+
+struct EdOp				// one replacement, enough to undo or redo it
+{
+	EdPos			at;
+	std::wstring	removed;
+	std::wstring	inserted;
+};
+
+enum class EdKind { Other, Type, Back, Del };
+
+struct EdGroup			// one undo step
+{
+	std::vector<EdOp>	ops;
+	EdPos				caretBefore;
+	EdPos				anchorBefore;
+	EdPos				caretAfter;
+	EdPos				anchorAfter;
+	EdKind				kind	= EdKind::Other;
+	int					serial	= 0;
+};
+
+struct EdBand			// an annotation's region, tracked as [start, end)
+{
+	EdPos	start;
+	EdPos	end;
+};
+
+struct Editor
+{
+	HWND		wnd{};
+	bool		active		= false;
+
+	std::vector<std::wstring>				lines;		// raw: tabs kept
+	std::vector<std::vector<hl::Token>>		toks;
+	std::vector<hl::ScanState>				states;		// scanner state at each line start
+	std::vector<int>						visW;		// line widths, tabs expanded
+	bool		crlf		= false;
+	bool		bom			= false;
+	std::optional<fs::file_time_type>		mtime;		// source mtime at enter/last save
+
+	EdPos		caret;
+	EdPos		anchor;					// selection is anchor..caret
+	int			goalVis		= -1;		// screen column kept by Up/Down
+	int			scrollX		= 0;
+	int			scrollY		= 0;
+	int			gutterW		= 56;
+	int			contentW	= 0;
+	int			contentH	= 0;
+
+	std::vector<EdBand>		bands;		// parallel to g.anns
+	std::vector<EdGroup>	undo;
+	std::vector<EdGroup>	redo;
+	int			nextSerial	= 1;
+	int			savedSerial	= 0;		// undo state id at the last save
+	bool		mergeOk		= false;	// next typing may join the last step
+
+	int			mouseMode	= 0;		// 0 none, 1 chars, 2 words, 3 lines
+	EdPos		mouseLo;
+	EdPos		mouseHi;
+};
+
+static Editor ed;
 
 // ------------------------------------------------------------------ helpers
 
@@ -298,8 +374,18 @@ static void EditAnnotation(
 );
 static void UpdateScrollbars();
 static void LayoutMain();
+static void EdGotoLine(int ln, int col = 0);
+static void EdOnZoom(double frac);
+static bool EdExit();
+static bool EdSave();
+static void EdToggle();
 
-static void InvalidateCode() { if (g.code) InvalidateRect(g.code, nullptr, FALSE); }
+static void InvalidateCode()
+{
+	if (g.code) InvalidateRect(g.code, nullptr, FALSE);
+
+	if (ed.wnd) InvalidateRect(ed.wnd, nullptr, FALSE);
+}
 static void InvalidateBars()
 {
 	if (g.findBar && IsWindowVisible(g.findBar))
@@ -459,6 +545,14 @@ static void DefaultHint()
 {
 	if (!g.flashMsg.empty()) return;
 
+	if (ed.active)
+	{
+		SetHint(L"Editing • Ctrl+Z undo • Ctrl+Y redo • Ctrl+S save • "
+				L"Done returns to the annotate view");
+
+		return;
+	}
+
 	std::wstring hint = L"Click or drag on line numbers to annotate • "
 						L"click a highlight to edit • Ctrl+F to search";
 
@@ -546,6 +640,14 @@ static void ShowAnnotation(int idx)
 	idx			= std::max(0, std::min(idx, (int)g.anns.size() - 1));
 	g.annIdx	= idx;
 
+	if (ed.active)						// jump the editor caret to its band
+	{
+		if ((size_t)idx < ed.bands.size())
+			EdGotoLine(ed.bands[(size_t)idx].start.ln + 1);
+
+		return;
+	}
+
 	const Annotation& a = g.anns[(size_t)idx];
 
 	ScrollToLine(a.start_line);
@@ -575,7 +677,7 @@ static void ShowAnnotation(int idx)
 
 static void GotoAnnotation(int step)
 {
-	if (!g.hasFile || g.anns.empty())
+	if (ed.active || !g.hasFile || g.anns.empty())
 		return;
 
 	int	n	= (int)g.anns.size();
@@ -680,6 +782,18 @@ static void GotoMatch(int idx)
 
 	const Match& m = g.matches[(size_t)g.matchIdx];
 
+	g.findCount =	std::to_wstring(g.matchIdx + 1) +
+					L" of " +
+					std::to_wstring(n);
+
+	if (ed.active)
+	{
+		EdGotoLine(m.ln, m.col);
+		InvalidateBars();
+
+		return;
+	}
+
 	ScrollToLine(m.ln);
 
 	int	x0		= g.pad + m.col * g.charW;
@@ -692,10 +806,6 @@ static void GotoMatch(int idx)
 		ClampScroll();
 	}
 
-	g.findCount =	std::to_wstring(g.matchIdx + 1) +
-					L" of " +
-					std::to_wstring(n);
-
 	UpdateScrollbars();
 
 	InvalidateCode();
@@ -703,7 +813,8 @@ static void GotoMatch(int idx)
 	InvalidateBars();
 }
 
-static void FindRefresh()
+// jump=false (refresh after an edit) recounts without moving the caret
+static void FindRefresh(bool jump = true)
 {
 	std::wstring query = GetWindowString(g.findEdit);
 
@@ -719,9 +830,11 @@ static void FindRefresh()
 
 		std::transform(q.begin(), q.end(), q.begin(), towlower);
 
-		for (int row = 0; row < LineCount() && g.matches.size() < 2000; ++row)
+		const auto& src = ed.active ? ed.lines : g.lines;
+
+		for (int row = 0; row < (int)src.size() && g.matches.size() < 2000; ++row)
 		{
-			std::wstring low = g.lines[(size_t)row];
+			std::wstring low = src[(size_t)row];
 
 			std::transform(low.begin(), low.end(), low.begin(), towlower);
 
@@ -740,9 +853,18 @@ static void FindRefresh()
 		}
 	}
 
-	if (!g.matches.empty())
+	if (!g.matches.empty() && jump)
 	{
 		GotoMatch(0);
+	}
+	else if (!g.matches.empty())
+	{
+		g.findCount =	std::to_wstring(g.matches.size()) +
+						(g.matches.size() == 1 ? L" match" : L" matches");
+
+		InvalidateBars();
+
+		InvalidateCode();
 	}
 	else
 	{
@@ -797,6 +919,24 @@ static bool BarsVisible()
 // Escape: dismiss find/goto bars, selection, and matches
 static void EscapeAction()
 {
+	if (ed.active)
+	{
+		ShowWindow(g.findBar, SW_HIDE);
+		ShowWindow(g.gotoBar, SW_HIDE);
+
+		g.matches.clear();
+
+		g.matchIdx = -1;
+
+		g.lastQuery.clear();
+
+		SetFocus(ed.wnd);
+
+		InvalidateCode();
+
+		return;
+	}
+
 	if (!(BarsVisible() || g.sel || !g.matches.empty())) return;
 
 	ShowWindow(g.findBar, SW_HIDE);
@@ -833,6 +973,17 @@ static void GotoLineAction()
 
 	if (!g.hasFile) return;
 
+	if (ed.active)
+	{
+		ShowWindow(g.gotoBar, SW_HIDE);
+
+		EdGotoLine(std::max(1, std::min((int)ed.lines.size(), ln)));
+
+		SetFocus(ed.wnd);
+
+		return;
+	}
+
 	ln = std::max(1, std::min(LineCount(), ln));
 
 	ShowWindow(g.gotoBar, SW_HIDE);
@@ -859,9 +1010,13 @@ static void Zoom(int delta)
 
 	double frac = g.contentH > 0 ? (double)g.scrollY / g.contentH : 0.0;
 
+	double edFrac = ed.contentH > 0 ? (double)ed.scrollY / ed.contentH : 0.0;
+
 	g.fontPt = pt;
 
 	CreateFonts();
+
+	if (ed.active) EdOnZoom(edFrac);
 
 	if (g.hasFile)
 	{
@@ -999,7 +1154,7 @@ static void Persist()
 
 static void UndoDelete()
 {
-	if (FocusInEdit() || !g.deletedAnn) return;
+	if (ed.active || FocusInEdit() || !g.deletedAnn) return;
 
 	auto& [path, ann] = *g.deletedAnn;
 
@@ -1021,7 +1176,7 @@ static void UndoDelete()
 // live-reload annotations when the sidecar changes outside the app
 static void PollSidecar()
 {
-	if (!g.hasFile || g.annError) return;
+	if (!g.hasFile || g.annError || ed.active) return;
 
 	fs::path							sidecar	= g.ws.sidecar_for(g.filePath);
 	std::error_code						ec;
@@ -1229,6 +1384,8 @@ static void RefreshBadge(const fs::path& p)
 
 static void OpenFolder(const fs::path& folder)
 {
+	if (!EdExit()) return;				// user kept editing
+
 	if (g.ws.ann_root_arg.empty() && g.wsOpen)
 	{ /* keep -a override */ }
 
@@ -1919,13 +2076,14 @@ static void PaintWelcome(HDC dc, int cw, int ch)
 		L"Open a project folder, pick a code file, and see its\n"
 		L"annotations overlaid transparently on the source.\n\n"
 		L"Click or drag on the line numbers to add an annotation.\n"
-		L"Click an existing highlight to edit it.\n\n"
+		L"Click an existing highlight to edit it, or use ✎ Edit\n"
+		L"to change the source itself.\n\n"
 		L"Ctrl+F finds text, Ctrl+G jumps to a line, Ctrl+C copies\n"
 		L"selected lines, Ctrl+wheel or Ctrl+=/- zooms the code,\n"
 		L"Alt+Down/Alt+Up jump to the next/previous annotation.\n\n"
 		L"Notes are saved in a parallel tree that mirrors the\n"
 		L"source layout (default: <project>/.annotations),\n"
-		L"so the source files themselves are never touched.";
+		L"so annotating never touches the source files.";
 	RECT			rb		= {cx - S(400), S(160), cx + S(400), ch};
 
 	DrawTextColor(dc, body, rb, g.fBody, FG_DIM, DT_CENTER);
@@ -2609,6 +2767,1603 @@ static LRESULT CALLBACK CodeProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 	return DefWindowProcW(w, msg, wp, lp);
 }
 
+// ---------------------------------------------------------------- edit mode
+//
+// "✎ Edit" swaps a real editor in for the code view: caret and selection,
+// undo/redo, clipboard, syntax colors re-scanned incrementally as you type,
+// and annotation bands that ride along with the text. Mirrors EditorPane in
+// code_annotator.py.
+
+static bool operator==(EdPos a, EdPos b) { return a.ln == b.ln && a.col == b.col; }
+static bool operator!=(EdPos a, EdPos b) { return !(a == b); }
+static bool operator<(EdPos a, EdPos b)  { return a.ln != b.ln ? a.ln < b.ln : a.col < b.col; }
+
+static bool IsHighSurrogate(wchar_t c)	{ return c >= 0xD800 && c <= 0xDBFF; }
+static bool IsLowSurrogate(wchar_t c)	{ return c >= 0xDC00 && c <= 0xDFFF; }
+
+static int		EdLineCount()	{ return (int)ed.lines.size(); }
+static EdPos	EdEnd()			{ return {EdLineCount() - 1, (int)ed.lines.back().size()}; }
+static bool		EdHasSel()		{ return ed.caret != ed.anchor; }
+static int		EdStateId()		{ return ed.undo.empty() ? 0 : ed.undo.back().serial; }
+static bool		EdDirty()		{ return EdStateId() != ed.savedSerial; }
+
+static EdPos EdClampPos(EdPos p)
+{
+	p.ln	= std::max(0, std::min(p.ln, EdLineCount() - 1));
+	p.col	= std::max(0, std::min(p.col, (int)ed.lines[(size_t)p.ln].size()));
+
+	return p;
+}
+
+static void EdSelRange(EdPos& a, EdPos& b)
+{
+	a = std::min(ed.caret, ed.anchor);
+	b = std::max(ed.caret, ed.anchor);
+}
+
+// screen column of a raw column (tabs expanded, surrogate pairs one cell)
+static int VisCol(const std::wstring& s, int col)
+{
+	int v = 0;
+
+	for (int i = 0; i < col && i < (int)s.size(); ++i)
+	{
+		if (s[(size_t)i] == L'\t')
+			v = (v / core::TAB_WIDTH + 1) * core::TAB_WIDTH;
+		else if (!IsLowSurrogate(s[(size_t)i]))
+			++v;
+	}
+
+	return v;
+}
+
+// raw column of the character boundary nearest to screen column fx
+static int ColFromVis(const std::wstring& s, double fx)
+{
+	int v = 0;
+
+	for (int i = 0; i < (int)s.size(); ++i)
+	{
+		wchar_t c = s[(size_t)i];
+
+		if (IsLowSurrogate(c)) continue;
+
+		int next = c == L'\t' ? (v / core::TAB_WIDTH + 1) * core::TAB_WIDTH : v + 1;
+
+		if (fx < next)
+			return (fx - v < next - fx) ? i : i + 1 + (IsHighSurrogate(c) ? 1 : 0);
+
+		v = next;
+	}
+
+	return (int)s.size();
+}
+
+static int NextCol(const std::wstring& s, int col)
+{
+	if (col >= (int)s.size()) return col;
+
+	++col;
+
+	if (col < (int)s.size() && IsLowSurrogate(s[(size_t)col])) ++col;
+
+	return col;
+}
+
+static int PrevCol(const std::wstring& s, int col)
+{
+	if (col <= 0) return 0;
+
+	--col;
+
+	if (col > 0 && IsLowSurrogate(s[(size_t)col])) --col;
+
+	return col;
+}
+
+static bool IsWordChar(wchar_t c) { return iswalnum(c) || c == L'_'; }
+
+// 0 whitespace, 1 word, 2 punctuation
+static int CharClass(wchar_t c) { return iswspace(c) ? 0 : IsWordChar(c) ? 1 : 2; }
+
+static EdPos EdCharLeft(EdPos p)
+{
+	if (p.col > 0) return {p.ln, PrevCol(ed.lines[(size_t)p.ln], p.col)};
+
+	if (p.ln > 0) return {p.ln - 1, (int)ed.lines[(size_t)p.ln - 1].size()};
+
+	return p;
+}
+
+static EdPos EdCharRight(EdPos p)
+{
+	const std::wstring& s = ed.lines[(size_t)p.ln];
+
+	if (p.col < (int)s.size()) return {p.ln, NextCol(s, p.col)};
+
+	if (p.ln + 1 < EdLineCount()) return {p.ln + 1, 0};
+
+	return p;
+}
+
+static EdPos EdWordLeft(EdPos p)
+{
+	if (p.col == 0) return EdCharLeft(p);
+
+	const std::wstring&	s	= ed.lines[(size_t)p.ln];
+	int					i	= p.col;
+
+	while (i > 0 && iswspace(s[(size_t)i - 1])) --i;
+
+	if (i > 0)
+	{
+		int cls = CharClass(s[(size_t)i - 1]);
+
+		while (i > 0 && CharClass(s[(size_t)i - 1]) == cls) --i;
+	}
+
+	return {p.ln, i};
+}
+
+static EdPos EdWordRight(EdPos p)
+{
+	const std::wstring&	s	= ed.lines[(size_t)p.ln];
+	int					n	= (int)s.size();
+
+	if (p.col >= n) return EdCharRight(p);
+
+	int i	= p.col;
+	int cls	= CharClass(s[(size_t)i]);
+
+	if (cls != 0)
+		while (i < n && CharClass(s[(size_t)i]) == cls) ++i;
+
+	while (i < n && iswspace(s[(size_t)i])) ++i;
+
+	return {p.ln, i};
+}
+
+// the word (or run of punctuation / whitespace) around a position
+static void EdWordAt(EdPos p, EdPos& a, EdPos& b)
+{
+	const std::wstring&	s	= ed.lines[(size_t)p.ln];
+	int					n	= (int)s.size();
+	int					i	= std::min(p.col, n);
+
+	if (n == 0)
+	{
+		a = b = {p.ln, 0};
+
+		return;
+	}
+
+	if (i == n) --i;
+
+	int cls = CharClass(s[(size_t)i]);
+	int lo	= i;
+	int hi	= i;
+
+	while (lo > 0 && CharClass(s[(size_t)lo - 1]) == cls) --lo;
+
+	while (hi < n && CharClass(s[(size_t)hi]) == cls) ++hi;
+
+	a = {p.ln, lo};
+	b = {p.ln, hi};
+}
+
+// position just past line ln, including its newline when there is one
+static EdPos EdAfterLine(int ln)
+{
+	if (ln + 1 < EdLineCount()) return {ln + 1, 0};
+
+	return {ln, (int)ed.lines[(size_t)ln].size()};
+}
+
+static std::wstring EdText(EdPos a, EdPos b)
+{
+	if (b < a) std::swap(a, b);
+
+	if (a.ln == b.ln)
+		return ed.lines[(size_t)a.ln].substr((size_t)a.col, (size_t)(b.col - a.col));
+
+	std::wstring out = ed.lines[(size_t)a.ln].substr((size_t)a.col);
+
+	for (int l = a.ln + 1; l < b.ln; ++l)
+	{
+		out += L'\n';
+		out += ed.lines[(size_t)l];
+	}
+
+	out += L'\n';
+	out += ed.lines[(size_t)b.ln].substr(0, (size_t)b.col);
+
+	return out;
+}
+
+// where text inserted at `at` ends
+static EdPos EdEndOf(EdPos at, const std::wstring& text)
+{
+	size_t nl = text.rfind(L'\n');
+
+	if (nl == std::wstring::npos) return {at.ln, at.col + (int)text.size()};
+
+	return {at.ln + (int)std::count(text.begin(), text.end(), L'\n'),
+			(int)(text.size() - nl - 1)};
+}
+
+// --- annotation bands -------------------------------------------------------
+
+// a position at or after an edit's replaced range [a, b), which now ends at e
+static EdPos EdShiftPast(EdPos p, EdPos b, EdPos e)
+{
+	if (p.ln == b.ln) return {e.ln, e.col + p.col - b.col};
+
+	return {p.ln + e.ln - b.ln, p.col};
+}
+
+// Bands follow the text like Tk tags: text typed at a band's edges stays
+// outside it, text typed inside it joins it, and a band whose whole region
+// is deleted collapses to a point that then behaves like a left-gravity
+// mark (the orphan position used on save).
+static void EdShiftBands(EdPos a, EdPos b, EdPos e)
+{
+	for (auto& bd : ed.bands)
+	{
+		if (bd.start == bd.end)
+		{
+			EdPos p = bd.start;
+
+			if (b < p)			p = EdShiftPast(p, b, e);
+			else if (!(p < a))	p = a;
+
+			bd.start = bd.end = p;
+
+			continue;
+		}
+
+		if (a < b && !(bd.start < a) && !(b < bd.end))
+		{
+			bd.start = bd.end = a;				// whole region deleted
+
+			continue;
+		}
+
+		if (!(bd.start < a))
+			bd.start = !(bd.start < b) ? EdShiftPast(bd.start, b, e) : e;
+
+		if (a < bd.end)
+			bd.end = b < bd.end ? EdShiftPast(bd.end, b, e) : a;
+
+		if (bd.end < bd.start) bd.end = bd.start;
+	}
+}
+
+static void EdBandLines(const EdBand& bd, int& lo, int& hi)		// 0-based, inclusive
+{
+	lo = bd.start.ln;
+	hi = bd.end.col == 0 ? bd.end.ln - 1 : bd.end.ln;
+	hi = std::max(lo, hi);
+}
+
+// --- highlighting -----------------------------------------------------------
+
+static bool SameScanState(const hl::ScanState& a, const hl::ScanState& b)
+{
+	return a.mode == b.mode && a.delim == b.delim;
+}
+
+// re-scan lines from..to (0-based), then keep going while the scanner state
+// carried into the following lines differs from what they were scanned with
+static void EdRehighlight(int from, int to)
+{
+	const hl::LangCfg*	cfg	= hl::lang_cfg(g.langId);
+	int					n	= EdLineCount();
+
+	if (!cfg)
+	{
+		for (int i = from; i <= to && i < n; ++i)
+		{
+			ed.toks[(size_t)i].clear();
+
+			if (!ed.lines[(size_t)i].empty())
+				ed.toks[(size_t)i].push_back({0, ed.lines[(size_t)i], hl::Tok::None});
+		}
+
+		return;
+	}
+
+	hl::ScanState st = ed.states[(size_t)from];
+
+	for (int i = from; i < n; ++i)
+	{
+		if (i > to && SameScanState(st, ed.states[(size_t)i])) break;
+
+		ed.states[(size_t)i]	= st;
+		ed.toks[(size_t)i]		= cfg->html
+			? hl::scan_html_line(ed.lines[(size_t)i], st)
+			: hl::scan_line(ed.lines[(size_t)i], *cfg, st);
+	}
+}
+
+// --- metrics / scrolling ----------------------------------------------------
+
+static void EdClientSize(int& w, int& h)
+{
+	RECT r;
+
+	GetClientRect(ed.wnd, &r);
+
+	w = r.right;
+	h = r.bottom;
+}
+
+static void EdMetrics()
+{
+	int n		= EdLineCount();
+	int maxVis	= 0;
+
+	for (int v : ed.visW) maxVis = std::max(maxVis, v);
+
+	int digits	= (int)std::to_wstring(std::max(1, n)).size();
+
+	ed.gutterW	= g.pad * 2 + std::max(2, digits) * g.charW;
+	ed.contentW	= g.pad * 2 + (maxVis + 1) * g.charW + S(100);
+	ed.contentH	= g.pad * 2 + n * g.lineH;
+}
+
+static void EdClampScroll()
+{
+	int w, h;
+
+	EdClientSize(w, h);
+
+	ed.scrollY = std::max(0, std::min(ed.scrollY, ed.contentH - h));
+	ed.scrollX = std::max(0, std::min(ed.scrollX, ed.contentW - std::max(1, w - ed.gutterW)));
+}
+
+static void EdUpdateScrollbars()
+{
+	int w, h;
+
+	EdClientSize(w, h);
+
+	SCROLLINFO si{sizeof si, SIF_RANGE | SIF_PAGE | SIF_POS};
+
+	si.nMax		= std::max(0, ed.contentH - 1);
+	si.nPage	= (UINT)h;
+	si.nPos		= ed.scrollY;
+
+	SetScrollInfo(ed.wnd, SB_VERT, &si, TRUE);
+
+	si.nMax		= std::max(0, ed.contentW - 1);
+	si.nPage	= (UINT)std::max(1, w - ed.gutterW);
+	si.nPos		= ed.scrollX;
+
+	SetScrollInfo(ed.wnd, SB_HORZ, &si, TRUE);
+}
+
+static void EdInvalidate() { if (ed.wnd) InvalidateRect(ed.wnd, nullptr, FALSE); }
+
+static void EdUpdateCaret()
+{
+	if (!ed.active || GetFocus() != ed.wnd) return;
+
+	const std::wstring& s = ed.lines[(size_t)ed.caret.ln];
+
+	int x = ed.gutterW + g.pad - ed.scrollX + VisCol(s, ed.caret.col) * g.charW;
+	int y = g.pad + ed.caret.ln * g.lineH - ed.scrollY + 1;
+
+	if (x < ed.gutterW) x = -S(100);		// scrolled under the gutter: hide
+
+	SetCaretPos(x, y);
+
+	// keep IME composition windows next to the caret
+	if (HIMC imc = ImmGetContext(ed.wnd))
+	{
+		COMPOSITIONFORM cf{};
+
+		cf.dwStyle			= CFS_POINT;
+		cf.ptCurrentPos		= {x, y};
+
+		ImmSetCompositionWindow(imc, &cf);
+		ImmReleaseContext(ed.wnd, imc);
+	}
+}
+
+static void EdScrollTo(int x, int y)
+{
+	ed.scrollX = x;
+	ed.scrollY = y;
+
+	EdClampScroll();
+	EdUpdateScrollbars();
+	EdUpdateCaret();
+	EdInvalidate();
+}
+
+static void EdEnsureVisible()
+{
+	int w, h;
+
+	EdClientSize(w, h);
+
+	int y		= g.pad + ed.caret.ln * g.lineH;
+	int sy		= ed.scrollY;
+
+	if (y < sy)							sy = y - g.pad;
+	else if (y + g.lineH > sy + h)		sy = y + g.lineH + g.pad - h;
+
+	int viewW	= std::max(1, w - ed.gutterW);
+	int x		= g.pad + VisCol(ed.lines[(size_t)ed.caret.ln], ed.caret.col) * g.charW;
+	int sx		= ed.scrollX;
+
+	if (x < sx + g.charW)					sx = x - viewW / 4;
+	else if (x > sx + viewW - 2 * g.charW)	sx = x - viewW * 3 / 4;
+
+	EdScrollTo(sx, sy);
+}
+
+static void EdUpdateTitle()
+{
+	if (!ed.active) return;
+
+	g.statusFile = g.filePath.filename().wstring() + L"  •  editing";
+
+	if (EdDirty()) g.statusFile += L"  ●";
+
+	InvalidateStatus();
+}
+
+// after any text change: metrics, scrollbars, title, stale find matches
+static void EdChanged()
+{
+	EdMetrics();
+	EdEnsureVisible();
+	EdUpdateTitle();
+
+	if (IsWindowVisible(g.findBar)) FindRefresh(false);
+
+	EdInvalidate();
+}
+
+// --- editing primitives -----------------------------------------------------
+
+// replace [a, b) with text (which uses '\n' newlines); returns its end
+static EdPos EdReplace(EdPos a, EdPos b, const std::wstring& text)
+{
+	std::vector<std::wstring>	parts(1);
+
+	for (wchar_t c : text)
+	{
+		if (c == L'\n')	parts.emplace_back();
+		else			parts.back() += c;
+	}
+
+	std::wstring tail	= ed.lines[(size_t)b.ln].substr((size_t)b.col);
+
+	parts.front().insert(0, ed.lines[(size_t)a.ln], 0, (size_t)a.col);
+
+	EdPos e				= {a.ln + (int)parts.size() - 1, (int)parts.back().size()};
+
+	parts.back() += tail;
+
+	auto first	= (ptrdiff_t)a.ln;
+	auto last	= (ptrdiff_t)b.ln + 1;
+	auto count	= (ptrdiff_t)parts.size();
+
+	hl::ScanState st0 = ed.states[(size_t)a.ln];
+
+	ed.lines.erase(ed.lines.begin() + first, ed.lines.begin() + last);
+	ed.lines.insert(ed.lines.begin() + first, parts.begin(), parts.end());
+
+	ed.toks.erase(ed.toks.begin() + first, ed.toks.begin() + last);
+	ed.toks.insert(ed.toks.begin() + first, (size_t)count, {});
+
+	ed.states.erase(ed.states.begin() + first, ed.states.begin() + last);
+	ed.states.insert(ed.states.begin() + first, (size_t)count, hl::ScanState{});
+	ed.states[(size_t)a.ln] = st0;
+
+	ed.visW.erase(ed.visW.begin() + first, ed.visW.begin() + last);
+	ed.visW.insert(ed.visW.begin() + first, (size_t)count, 0);
+
+	for (int i = a.ln; i < a.ln + (int)count; ++i)
+	{
+		const std::wstring& s = ed.lines[(size_t)i];
+
+		ed.visW[(size_t)i] = VisCol(s, (int)s.size());
+	}
+
+	EdShiftBands(a, b, e);
+	EdRehighlight(a.ln, a.ln + (int)count - 1);
+
+	return e;
+}
+
+// one user edit: replace [a, b) with text, recorded for undo. Consecutive
+// typing / backspacing / deleting merge into one undo step.
+static void EdEdit(EdPos a, EdPos b, const std::wstring& text, EdKind kind)
+{
+	if (b < a) std::swap(a, b);
+
+	if (a == b && text.empty()) return;
+
+	EdOp	op			= {a, EdText(a, b), text};
+	EdPos	caretBefore	= ed.caret;
+	EdPos	anchorBefore= ed.anchor;
+	EdPos	e			= EdReplace(a, b, text);
+
+	ed.caret = ed.anchor = e;
+
+	bool merge = ed.mergeOk &&
+				 kind != EdKind::Other &&
+				 !ed.undo.empty() &&
+				 ed.undo.back().kind == kind;
+
+	if (merge)
+	{
+		EdGroup& grp = ed.undo.back();
+
+		grp.ops.push_back(std::move(op));
+
+		grp.caretAfter	= ed.caret;
+		grp.anchorAfter	= ed.anchor;
+	}
+	else
+	{
+		EdGroup grp;
+
+		grp.ops.push_back(std::move(op));
+
+		grp.caretBefore		= caretBefore;
+		grp.anchorBefore	= anchorBefore;
+		grp.caretAfter		= ed.caret;
+		grp.anchorAfter		= ed.anchor;
+		grp.kind			= kind;
+		grp.serial			= ed.nextSerial++;
+
+		ed.undo.push_back(std::move(grp));
+	}
+
+	ed.redo.clear();
+
+	ed.mergeOk	= kind != EdKind::Other;
+	ed.goalVis	= -1;
+
+	EdChanged();
+}
+
+static void EdReplaceSel(const std::wstring& text, EdKind kind)
+{
+	EdPos a, b;
+
+	EdSelRange(a, b);
+
+	if (a != b) kind = EdKind::Other;
+
+	EdEdit(a, b, text, kind);
+}
+
+static void EdUndo()
+{
+	if (ed.undo.empty()) return;
+
+	EdGroup grp = std::move(ed.undo.back());
+
+	ed.undo.pop_back();
+
+	for (auto it = grp.ops.rbegin(); it != grp.ops.rend(); ++it)
+		EdReplace(it->at, EdEndOf(it->at, it->inserted), it->removed);
+
+	ed.caret	= grp.caretBefore;
+	ed.anchor	= grp.anchorBefore;
+
+	ed.redo.push_back(std::move(grp));
+
+	ed.mergeOk	= false;
+	ed.goalVis	= -1;
+
+	EdChanged();
+}
+
+static void EdRedo()
+{
+	if (ed.redo.empty()) return;
+
+	EdGroup grp = std::move(ed.redo.back());
+
+	ed.redo.pop_back();
+
+	for (const auto& op : grp.ops)
+		EdReplace(op.at, EdEndOf(op.at, op.removed), op.inserted);
+
+	ed.caret	= grp.caretAfter;
+	ed.anchor	= grp.anchorAfter;
+
+	ed.undo.push_back(std::move(grp));
+
+	ed.mergeOk	= false;
+	ed.goalVis	= -1;
+
+	EdChanged();
+}
+
+// --- caret movement ---------------------------------------------------------
+
+static void EdMoveTo(EdPos p, bool extend)
+{
+	ed.caret = EdClampPos(p);
+
+	if (!extend) ed.anchor = ed.caret;
+
+	ed.mergeOk = false;
+
+	EdEnsureVisible();
+	EdInvalidate();
+}
+
+static void EdMoveVert(int lines, bool extend)
+{
+	if (ed.goalVis < 0)
+		ed.goalVis = VisCol(ed.lines[(size_t)ed.caret.ln], ed.caret.col);
+
+	int		goal	= ed.goalVis;
+	int		ln		= ed.caret.ln + lines;
+	EdPos	p;
+
+	if (ln < 0)							p = {0, 0};
+	else if (ln >= EdLineCount())		p = EdEnd();
+	else								p = {ln, ColFromVis(ed.lines[(size_t)ln], goal)};
+
+	EdMoveTo(p, extend);
+
+	ed.goalVis = goal;
+}
+
+static void EdSelectAll()
+{
+	ed.anchor	= {0, 0};
+	ed.caret	= EdEnd();
+	ed.mergeOk	= false;
+
+	EdEnsureVisible();
+	EdInvalidate();
+}
+
+// --- clipboard --------------------------------------------------------------
+
+static bool EdCopy()
+{
+	if (!EdHasSel()) return false;
+
+	std::wstring text;
+
+	for (wchar_t c : EdText(ed.caret, ed.anchor))
+	{
+		if (c == L'\n') text += L'\r';
+
+		text += c;
+	}
+
+	if (!OpenClipboard(g.main)) return false;
+
+	EmptyClipboard();
+
+	size_t	bytes	= (text.size() + 1) * sizeof(wchar_t);
+	HGLOBAL	mem		= GlobalAlloc(GMEM_MOVEABLE, bytes);
+
+	if (mem)
+	{
+		memcpy(GlobalLock(mem), text.c_str(), bytes);
+
+		GlobalUnlock(mem);
+
+		SetClipboardData(CF_UNICODETEXT, mem);
+	}
+
+	CloseClipboard();
+
+	return true;
+}
+
+static void EdPaste()
+{
+	if (!OpenClipboard(g.main)) return;
+
+	std::wstring	text;
+	HANDLE			h		= GetClipboardData(CF_UNICODETEXT);
+
+	if (h)
+	{
+		if (const wchar_t* p = (const wchar_t*)GlobalLock(h))
+		{
+			for (; *p; ++p)
+			{
+				if (*p == L'\r')
+				{
+					if (p[1] == L'\n') ++p;
+
+					text += L'\n';
+				}
+				else
+				{
+					text += *p;
+				}
+			}
+
+			GlobalUnlock(h);
+		}
+	}
+
+	CloseClipboard();
+
+	if (!text.empty()) EdReplaceSel(text, EdKind::Other);
+}
+
+// --- painting ---------------------------------------------------------------
+
+static void EdPaint(HDC dc, int cw, int ch)
+{
+	RECT all = {0, 0, cw, ch};
+
+	FillRectColor(dc, all, BG);
+
+	SetBkMode(dc, TRANSPARENT);
+
+	int	n	= EdLineCount();
+	int	lh	= g.lineH;
+	int	r0	= std::max(0, (ed.scrollY - g.pad) / lh);
+	int	r1	= std::min(n - 1, (ed.scrollY + ch - g.pad) / lh + 1);
+
+	auto lineTop = [&](int ln0) { return g.pad + ln0 * lh - ed.scrollY; };
+
+	// gutter line numbers; the caret's line is brighter
+	HGDIOBJ oldFont = SelectObject(dc, g.fCode);
+
+	SetTextAlign(dc, TA_RIGHT | TA_TOP);
+
+	for (int row = r0; row <= r1; ++row)
+	{
+		std::wstring num = std::to_wstring(row + 1);
+
+		SetTextColor(dc, row == ed.caret.ln ? FG : GUTTER_FG);
+
+		ExtTextOutW(dc, ed.gutterW - g.pad, lineTop(row) + 2, 0, nullptr,
+					num.c_str(), (UINT)num.size(), nullptr);
+	}
+
+	SetTextAlign(dc, TA_LEFT | TA_TOP);
+
+	SaveDC(dc);
+
+	IntersectClipRect(dc, ed.gutterW, 0, cw, ch);
+
+	int		bandL	= ed.gutterW - ed.scrollX;
+	int		bandR	= std::max(cw, bandL + ed.contentW);
+	int		xOff	= ed.gutterW + g.pad - ed.scrollX;
+	double	alpha	= g.opacity / 100.0;
+
+	auto xAt = [&](int ln0, int col)
+	{
+		return xOff + VisCol(ed.lines[(size_t)ln0], col) * g.charW;
+	};
+
+	// annotation bands
+	if (g.showAnns)
+	{
+		for (size_t i = 0; i < ed.bands.size() && i < g.anns.size(); ++i)
+		{
+			const Annotation&	a	= g.anns[i];
+			const EdBand&		bd	= ed.bands[i];
+
+			if (!g.visColors.count(a.color) || bd.start == bd.end) continue;
+
+			int lo, hi;
+
+			EdBandLines(bd, lo, hi);
+
+			int y0 = lineTop(lo);
+			int y1 = lineTop(hi + 1);
+
+			if (y1 < 0 || y0 > ch) continue;
+
+			const auto*	c	= AnnRGB(a);
+			double		f	= a.orphaned ? 0.18 : 0.45;
+			RECT		r	= {bandL, y0, bandR, y1};
+
+			FillRectColor(dc, r, Blend(BG, c->r, c->g, c->b, alpha * f));
+
+			RECT re = {bandL, y0, bandL + 3, y1};
+
+			FillRectColor(dc, re, Blend(BG, c->r, c->g, c->b, std::min(1.0, alpha * 1.5)));
+		}
+	}
+
+	// find matches
+	for (int i = 0; i < (int)g.matches.size(); ++i)
+	{
+		const Match& m = g.matches[(size_t)i];
+
+		if (m.ln - 1 < r0 || m.ln - 1 > r1 || m.ln > n) continue;
+
+		int		y0	= lineTop(m.ln - 1);
+		bool	cur	= i == g.matchIdx;
+		RECT	r	= {xAt(m.ln - 1, m.col), y0 + 1, xAt(m.ln - 1, m.col + m.len), y0 + lh - 1};
+
+		FillRectColor(dc, r, Blend(BG, 210, 170, 60, cur ? 0.55 : 0.25));
+	}
+
+	// selection
+	if (EdHasSel())
+	{
+		EdPos a, b;
+
+		EdSelRange(a, b);
+
+		COLORREF selC = RGB(0x26, 0x4f, 0x78);
+
+		for (int row = std::max(a.ln, r0); row <= std::min(b.ln, r1); ++row)
+		{
+			int x0 = row == a.ln ? xAt(row, a.col) : xOff;
+			int x1 = row == b.ln ? xAt(row, b.col)
+								 : xAt(row, (int)ed.lines[(size_t)row].size()) + g.charW / 2;
+
+			RECT r = {x0, lineTop(row), x1, lineTop(row) + lh};
+
+			FillRectColor(dc, r, selC);
+		}
+	}
+
+	// code text: tokens, with tabs expanded to the next tab stop
+	SelectObject(dc, g.fCode);
+
+	for (int row = r0; row <= r1; ++row)
+	{
+		int y = lineTop(row) + 2;
+
+		for (const auto& t : ed.toks[(size_t)row])
+		{
+			SetTextColor(dc, tok_color(t.cls));
+
+			size_t i = 0;
+
+			while (i < t.text.size())
+			{
+				size_t j = t.text.find(L'\t', i);
+
+				if (j == std::wstring::npos) j = t.text.size();
+
+				if (j > i)
+				{
+					ExtTextOutW(dc, xAt(row, t.col + (int)i), y, 0, nullptr,
+								t.text.c_str() + i, (UINT)(j - i), nullptr);
+				}
+
+				i = j + 1;
+			}
+		}
+	}
+
+	RestoreDC(dc, -1);
+
+	SelectObject(dc, oldFont);
+}
+
+// --- mouse ------------------------------------------------------------------
+
+static EdPos EdPosFromPoint(POINT pt)
+{
+	int ln = (int)std::floor((double)(pt.y + ed.scrollY - g.pad) / g.lineH);
+
+	ln = std::max(0, std::min(ln, EdLineCount() - 1));
+
+	double fx = (double)(pt.x - (ed.gutterW + g.pad - ed.scrollX)) / g.charW;
+
+	return {ln, ColFromVis(ed.lines[(size_t)ln], fx)};
+}
+
+static void EdDragTo(POINT pt)
+{
+	EdPos p = EdPosFromPoint(pt);
+
+	if (ed.mouseMode == 1)
+	{
+		ed.caret = p;
+	}
+	else if (ed.mouseMode == 2)				// by words
+	{
+		EdPos a, b;
+
+		EdWordAt(p, a, b);
+
+		if (p < ed.mouseLo)	{ ed.anchor = ed.mouseHi; ed.caret = a; }
+		else				{ ed.anchor = ed.mouseLo; ed.caret = std::max(b, ed.mouseHi); }
+	}
+	else if (ed.mouseMode == 3)				// by lines (gutter drag)
+	{
+		if (p.ln >= ed.mouseLo.ln)	{ ed.anchor = {ed.mouseLo.ln, 0}; ed.caret = EdAfterLine(p.ln); }
+		else						{ ed.anchor = EdAfterLine(ed.mouseLo.ln); ed.caret = {p.ln, 0}; }
+	}
+
+	EdEnsureVisible();
+	EdInvalidate();
+}
+
+// --- keyboard ---------------------------------------------------------------
+
+static void EdDeleteSelOr(EdPos target, EdKind kind)
+{
+	if (EdHasSel())
+		EdReplaceSel(L"", EdKind::Other);
+	else
+		EdEdit(ed.caret, target, L"", kind);
+}
+
+static bool EdKeyDown(WPARAM vk)
+{
+	bool	ctrl	= GetKeyState(VK_CONTROL) < 0;
+	bool	shift	= GetKeyState(VK_SHIFT) < 0;
+	int		w, h;
+
+	EdClientSize(w, h);
+
+	int		page	= std::max(1, h / g.lineH - 1);
+	EdPos	a, b;
+
+	EdSelRange(a, b);
+
+	switch (vk)
+	{
+		case VK_LEFT:
+			ed.goalVis = -1;
+
+			if (EdHasSel() && !shift && !ctrl)	EdMoveTo(a, false);
+			else								EdMoveTo(ctrl ? EdWordLeft(ed.caret) : EdCharLeft(ed.caret), shift);
+
+			return true;
+
+		case VK_RIGHT:
+			ed.goalVis = -1;
+
+			if (EdHasSel() && !shift && !ctrl)	EdMoveTo(b, false);
+			else								EdMoveTo(ctrl ? EdWordRight(ed.caret) : EdCharRight(ed.caret), shift);
+
+			return true;
+
+		case VK_UP:
+		case VK_DOWN:
+		{
+			int dir = vk == VK_UP ? -1 : 1;
+
+			if (ctrl)	EdScrollTo(ed.scrollX, ed.scrollY + dir * g.lineH);
+			else		EdMoveVert(dir, shift);
+
+			return true;
+		}
+
+		case VK_PRIOR:
+		case VK_NEXT:
+		{
+			int dir = vk == VK_PRIOR ? -1 : 1;
+
+			ed.scrollY += dir * page * g.lineH;
+
+			EdClampScroll();
+			EdMoveVert(dir * page, shift);
+
+			return true;
+		}
+
+		case VK_HOME:
+		{
+			ed.goalVis = -1;
+
+			if (ctrl)
+			{
+				EdMoveTo({0, 0}, shift);
+
+				return true;
+			}
+
+			// smart home: first non-blank, then column 0
+			const std::wstring&	s		= ed.lines[(size_t)ed.caret.ln];
+			int					indent	= 0;
+
+			while (indent < (int)s.size() && (s[(size_t)indent] == L' ' || s[(size_t)indent] == L'\t'))
+				++indent;
+
+			EdMoveTo({ed.caret.ln, ed.caret.col == indent ? 0 : indent}, shift);
+
+			return true;
+		}
+
+		case VK_END:
+			ed.goalVis = -1;
+
+			EdMoveTo(ctrl ? EdEnd() : EdPos{ed.caret.ln, (int)ed.lines[(size_t)ed.caret.ln].size()}, shift);
+
+			return true;
+
+		case VK_BACK:
+			EdDeleteSelOr(ctrl ? EdWordLeft(ed.caret) : EdCharLeft(ed.caret),
+						  ctrl ? EdKind::Other : EdKind::Back);
+
+			return true;
+
+		case VK_DELETE:
+			if (shift && !ctrl)
+			{
+				if (EdCopy()) EdReplaceSel(L"", EdKind::Other);		// Shift+Del cuts
+
+				return true;
+			}
+
+			EdDeleteSelOr(ctrl ? EdWordRight(ed.caret) : EdCharRight(ed.caret),
+						  ctrl ? EdKind::Other : EdKind::Del);
+
+			return true;
+
+		case VK_INSERT:
+			if (ctrl)		EdCopy();
+			else if (shift)	EdPaste();
+
+			return true;
+
+		case VK_RETURN:
+			EdReplaceSel(L"\n", EdKind::Other);
+
+			return true;
+
+		case VK_TAB:
+			if (!ctrl) EdReplaceSel(L"\t", EdKind::Type);
+
+			return true;
+	}
+
+	if (!ctrl) return false;
+
+	switch (vk)
+	{
+		case 'A':	EdSelectAll();							return true;
+		case 'C':	EdCopy();								return true;
+		case 'X':	if (EdCopy()) EdReplaceSel(L"", EdKind::Other); return true;
+		case 'V':	EdPaste();								return true;
+		case 'Y':	EdRedo();								return true;
+		case 'Z':	shift ? EdRedo() : EdUndo();			return true;
+	}
+
+	return false;
+}
+
+static void EdTypeChar(wchar_t c)
+{
+	// a space after a word closes the current typing undo step, so undo
+	// works roughly a word at a time
+	if (iswspace(c) && ed.caret.col > 0 &&
+		!iswspace(ed.lines[(size_t)ed.caret.ln][(size_t)ed.caret.col - 1]))
+	{
+		ed.mergeOk = false;
+	}
+
+	EdReplaceSel(std::wstring(1, c), EdKind::Type);
+}
+
+static LRESULT CALLBACK EditorProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
+{
+	switch (msg)
+	{
+		case WM_ERASEBKGND:
+			return 1;
+
+		case WM_PAINT:
+		{
+			PAINTSTRUCT	ps;
+			HDC			dc	= BeginPaint(w, &ps);
+			RECT		rc;
+
+			GetClientRect(w, &rc);
+
+			HDC		mem	= CreateCompatibleDC(dc);
+			HBITMAP	bmp	= CreateCompatibleBitmap(dc, rc.right, rc.bottom);
+			HGDIOBJ	ob	= SelectObject(mem, bmp);
+
+			if (ed.active)	EdPaint(mem, rc.right, rc.bottom);
+			else			FillRectColor(mem, rc, BG);
+
+			BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+
+			SelectObject(mem, ob);
+			DeleteObject(bmp);
+			DeleteDC(mem);
+
+			EndPaint(w, &ps);
+
+			return 0;
+		}
+
+		case WM_SIZE:
+			if (ed.active)
+			{
+				EdClampScroll();
+				EdUpdateScrollbars();
+				EdUpdateCaret();
+			}
+
+			return 0;
+
+		case WM_SETFOCUS:
+			CreateCaret(w, nullptr, std::max(2, S(2)), g.lineH - 2);
+
+			EdUpdateCaret();
+
+			ShowCaret(w);
+
+			return 0;
+
+		case WM_KILLFOCUS:
+			DestroyCaret();
+
+			return 0;
+
+		case WM_VSCROLL:
+		case WM_HSCROLL:
+		{
+			if (!ed.active) return 0;
+
+			bool	vert	= msg == WM_VSCROLL;
+			int		cw, chh;
+
+			EdClientSize(cw, chh);
+
+			int		pageV	= vert ? chh : std::max(1, cw - ed.gutterW);
+			int		stepV	= vert ? g.lineH : g.charW * 4;
+			int&	pos		= vert ? ed.scrollY : ed.scrollX;
+
+			switch (LOWORD(wp))
+			{
+				case SB_LINEUP:		pos -= stepV;	break;
+				case SB_LINEDOWN:	pos += stepV;	break;
+				case SB_PAGEUP:		pos -= pageV;	break;
+				case SB_PAGEDOWN:	pos += pageV;	break;
+				case SB_TOP:		pos = 0;		break;
+				case SB_BOTTOM:		pos = INT_MAX / 2; break;
+				case SB_THUMBTRACK:
+				case SB_THUMBPOSITION:
+				{
+					SCROLLINFO si{sizeof si, SIF_TRACKPOS};
+
+					GetScrollInfo(w, vert ? SB_VERT : SB_HORZ, &si);
+
+					pos = si.nTrackPos;
+
+					break;
+				}
+			}
+
+			EdScrollTo(ed.scrollX, ed.scrollY);
+
+			return 0;
+		}
+
+		case WM_MOUSEWHEEL:
+		{
+			int step = GET_WHEEL_DELTA_WPARAM(wp) > 0 ? 1 : -1;
+
+			if (GET_KEYSTATE_WPARAM(wp) & MK_CONTROL)	Zoom(step);
+			else if (ed.active)							EdScrollTo(ed.scrollX, ed.scrollY - step * 3 * g.lineH);
+
+			return 0;
+		}
+
+		case WM_SETCURSOR:
+			if (LOWORD(lp) == HTCLIENT)
+			{
+				POINT pt;
+
+				GetCursorPos(&pt);
+				ScreenToClient(w, &pt);
+				SetCursor(LoadCursorW(nullptr, pt.x < ed.gutterW ? IDC_ARROW : IDC_IBEAM));
+
+				return TRUE;
+			}
+
+			break;
+
+		case WM_LBUTTONDOWN:
+		case WM_LBUTTONDBLCLK:
+		{
+			SetFocus(w);
+
+			if (!ed.active) return 0;
+
+			POINT	pt		= {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+			EdPos	p		= EdPosFromPoint(pt);
+			bool	shift	= (wp & MK_SHIFT) != 0;
+
+			SetCapture(w);
+			SetTimer(w, 1, 50, nullptr);			// drag autoscroll
+
+			ed.mergeOk	= false;
+			ed.goalVis	= -1;
+
+			if (pt.x < ed.gutterW)
+			{
+				ed.mouseMode	= 3;
+				ed.mouseLo		= {p.ln, 0};
+				ed.anchor		= {p.ln, 0};
+				ed.caret		= EdAfterLine(p.ln);
+			}
+			else if (msg == WM_LBUTTONDBLCLK)
+			{
+				ed.mouseMode = 2;
+
+				EdWordAt(p, ed.mouseLo, ed.mouseHi);
+
+				ed.anchor	= ed.mouseLo;
+				ed.caret	= ed.mouseHi;
+			}
+			else
+			{
+				ed.mouseMode	= 1;
+				ed.caret		= p;
+
+				if (!shift) ed.anchor = p;
+			}
+
+			EdEnsureVisible();
+			EdInvalidate();
+
+			return 0;
+		}
+
+		case WM_MOUSEMOVE:
+			if (GetCapture() == w && ed.active && ed.mouseMode)
+				EdDragTo({GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
+
+			return 0;
+
+		case WM_TIMER:
+		{
+			if (GetCapture() != w || !ed.active || !ed.mouseMode) return 0;
+
+			POINT	pt;
+			RECT	rc;
+
+			GetCursorPos(&pt);
+			ScreenToClient(w, &pt);
+			GetClientRect(w, &rc);
+
+			if (!PtInRect(&rc, pt)) EdDragTo(pt);
+
+			return 0;
+		}
+
+		case WM_LBUTTONUP:
+		case WM_CAPTURECHANGED:
+			if (msg == WM_LBUTTONUP && GetCapture() == w) ReleaseCapture();
+
+			KillTimer(w, 1);
+
+			ed.mouseMode = 0;
+
+			return 0;
+
+		case WM_KEYDOWN:
+			if (ed.active && EdKeyDown(wp)) return 0;
+
+			break;
+
+		case WM_CHAR:
+			// control characters are handled as keys in WM_KEYDOWN
+			if (ed.active && wp >= 0x20 && wp != 0x7F)
+				EdTypeChar((wchar_t)wp);
+
+			return 0;
+	}
+
+	return DefWindowProcW(w, msg, wp, lp);
+}
+
+// --- entering / leaving / saving ---------------------------------------------
+
+static void EdHideBars()
+{
+	ShowWindow(g.findBar, SW_HIDE);
+	ShowWindow(g.gotoBar, SW_HIDE);
+
+	g.matches.clear();
+
+	g.matchIdx = -1;
+
+	g.lastQuery.clear();
+}
+
+static void EdEnter()
+{
+	if (ed.active) return;
+
+	if (!g.hasFile)
+	{
+		FlashStatus(L"Open a file first");
+
+		return;
+	}
+
+	if (g.truncated)
+	{
+		FlashStatus(L"File is truncated in this view — too large to edit here");
+
+		return;
+	}
+
+	core::EditSource src = core::load_source_for_edit(g.filePath);
+
+	if (src.status == core::EditSource::Unreadable)
+	{
+		FlashStatus(L"Could not read file: " + g.filePath.filename().wstring());
+
+		return;
+	}
+
+	if (src.status == core::EditSource::NotUtf8)
+	{
+		FlashStatus(L"File is not valid UTF-8 — editing disabled");
+
+		return;
+	}
+
+	EdHideBars();
+
+	g.sel.reset();
+	g.pending.reset();
+
+	std::error_code ec;
+	auto			t	= fs::last_write_time(g.filePath, ec);
+
+	ed.mtime	= ec ? std::nullopt : std::optional(t);
+	ed.lines	= std::move(src.lines);
+	ed.crlf		= src.crlf;
+	ed.bom		= src.bom;
+
+	int n = EdLineCount();
+
+	ed.toks.assign((size_t)n, {});
+	ed.states.assign((size_t)n, hl::ScanState{});
+	ed.visW.assign((size_t)n, 0);
+
+	for (int i = 0; i < n; ++i)
+		ed.visW[(size_t)i] = VisCol(ed.lines[(size_t)i], (int)ed.lines[(size_t)i].size());
+
+	EdRehighlight(0, n - 1);
+
+	// each annotation's lines become a tracked [start, end) region
+	ed.bands.clear();
+
+	for (const auto& a : g.anns)
+	{
+		int		lo	= std::min(a.start_line, n) - 1;
+		int		hi	= std::min(a.end_line, n);			// next line, 0-based
+		EdBand	bd;
+
+		bd.start	= {lo, 0};
+		bd.end		= hi < n ? EdPos{hi, 0} : EdEnd();
+
+		ed.bands.push_back(bd);
+	}
+
+	ed.undo.clear();
+	ed.redo.clear();
+
+	ed.nextSerial	= 1;
+	ed.savedSerial	= 0;
+	ed.mergeOk		= false;
+	ed.goalVis		= -1;
+	ed.mouseMode	= 0;
+	ed.active		= true;
+
+	// open at the same spot the annotate view was showing
+	ed.scrollX		= 0;
+	ed.scrollY		= g.scrollY;
+
+	int top = std::max(0, std::min(n - 1, (g.scrollY + g.lineH - 1) / g.lineH));
+
+	ed.caret = ed.anchor = {top, 0};
+
+	EdMetrics();
+
+	ShowWindow(g.code, SW_HIDE);
+	ShowWindow(ed.wnd, SW_SHOW);
+
+	EdClampScroll();
+	EdUpdateScrollbars();
+
+	SetFocus(ed.wnd);
+
+	EdUpdateTitle();
+	DefaultHint();
+
+	InvalidateChrome();
+	EdInvalidate();
+}
+
+// re-anchor annotations from their bands, then persist any changes
+static void EdSyncAnnotations()
+{
+	bool changed = false;
+
+	for (size_t i = 0; i < g.anns.size() && i < ed.bands.size(); ++i)
+	{
+		const EdBand& bd = ed.bands[i];
+
+		changed |= core::rebase_annotation(
+			g.anns[i],
+			bd.start.ln,
+			bd.end.ln,
+			bd.end.col,
+			bd.start == bd.end,
+			ed.lines);
+	}
+
+	if (!changed) return;
+
+	// keep the bands parallel to the (re-sorted) annotations
+	std::vector<std::pair<Annotation, EdBand>> pairs;
+
+	for (size_t i = 0; i < g.anns.size(); ++i)
+		pairs.push_back({g.anns[i], i < ed.bands.size() ? ed.bands[i] : EdBand{}});
+
+	std::stable_sort(
+		pairs.begin(),
+		pairs.end(),
+		[](const auto& x, const auto& y) { return x.first.start_line < y.first.start_line; });
+
+	for (size_t i = 0; i < pairs.size(); ++i)
+	{
+		g.anns[i] = pairs[i].first;
+
+		if (i < ed.bands.size()) ed.bands[i] = pairs[i].second;
+	}
+
+	Persist();
+}
+
+static bool EdSave()
+{
+	if (!ed.active) return false;
+
+	std::wstring	name	= g.filePath.filename().wstring();
+	std::error_code	ec;
+	auto			onDisk	= fs::last_write_time(g.filePath, ec);
+
+	if (!ec && ed.mtime && onDisk != *ed.mtime)
+	{
+		std::wstring msg =	name +
+							L" was modified outside the editor.\n\n"
+							L"Overwrite it with your version?";
+
+		if (MessageBoxW(g.main, msg.c_str(), L"File changed on disk",
+						MB_YESNO | MB_ICONWARNING) != IDYES)
+		{
+			return false;
+		}
+	}
+
+	// atomic save (temp file + rename), so a crash mid-save can't destroy
+	// the source file
+	if (!core::write_file_atomic(g.filePath, core::join_source(ed.lines, ed.crlf, ed.bom)))
+	{
+		std::wstring msg = L"Could not write the source file:\n" + g.filePath.wstring();
+
+		MessageBoxW(g.main, msg.c_str(), L"Save failed", MB_ICONERROR);
+
+		return false;
+	}
+
+	auto t = fs::last_write_time(g.filePath, ec);
+
+	ed.mtime = ec ? std::nullopt : std::optional(t);
+
+	EdSyncAnnotations();
+
+	ed.savedSerial	= EdStateId();
+	ed.mergeOk		= false;			// later typing must not join a saved step
+
+	EdUpdateTitle();
+	FlashStatus(L"Saved " + name);
+
+	return true;
+}
+
+// leave edit mode; false if the user cancelled (or a requested save failed)
+static bool EdExit()
+{
+	if (!ed.active) return true;
+
+	if (EdDirty())
+	{
+		std::wstring msg = L"Save changes to " + g.filePath.filename().wstring() + L"?";
+
+		int r = MessageBoxW(g.main, msg.c_str(), L"Unsaved changes",
+							MB_YESNOCANCEL | MB_ICONWARNING);
+
+		if (r == IDCANCEL) return false;
+
+		if (r == IDYES && !EdSave()) return false;
+	}
+
+	int keepY = ed.scrollY;
+
+	EdHideBars();
+
+	ed.active = false;
+
+	ed.lines.clear();
+	ed.toks.clear();
+	ed.states.clear();
+	ed.visW.clear();
+	ed.bands.clear();
+	ed.undo.clear();
+	ed.redo.clear();
+
+	ShowWindow(ed.wnd, SW_HIDE);
+	ShowWindow(g.code, SW_SHOW);
+
+	fs::path path = g.filePath;
+
+	OpenFile(path);						// re-render the (possibly new) source
+
+	g.scrollY = keepY;
+
+	ClampScroll();
+	UpdateScrollbars();
+
+	SetFocus(g.code);
+
+	InvalidateChrome();
+	InvalidateCode();
+
+	return true;
+}
+
+static void EdToggle()
+{
+	if (ed.active)	EdExit();
+	else			EdEnter();
+}
+
+static void EdOnZoom(double frac)
+{
+	EdMetrics();
+
+	ed.scrollY = (int)(frac * ed.contentH);
+
+	EdClampScroll();
+	EdUpdateScrollbars();
+
+	if (GetFocus() == ed.wnd)
+	{
+		DestroyCaret();
+		CreateCaret(ed.wnd, nullptr, std::max(2, S(2)), g.lineH - 2);
+		EdUpdateCaret();
+		ShowCaret(ed.wnd);
+	}
+
+	EdInvalidate();
+}
+
+// caret to the start of a 1-based line (find/goto/outline in edit mode)
+static void EdGotoLine(int ln, int col)
+{
+	EdPos p = EdClampPos({ln - 1, col});
+
+	ed.anchor	= p;
+	ed.caret	= p;
+	ed.mergeOk	= false;
+	ed.goalVis	= -1;
+
+	EdEnsureVisible();
+	EdInvalidate();
+}
+
 // ------------------------------------------------------------ find/goto bars
 
 static LRESULT CALLBACK BarProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
@@ -2767,13 +4522,16 @@ static void LayoutMain()
 		outlineH - S(4),
 		TRUE);
 
-	MoveWindow(
-		g.code,
-		g.treeW + S(4),
-		top,
-		std::max(0, w - g.treeW - S(4)),
-		std::max(0, bottom - top),
-		TRUE);
+	for (HWND pane : {g.code, ed.wnd})
+	{
+		MoveWindow(
+			pane,
+			g.treeW + S(4),
+			top,
+			std::max(0, w - g.treeW - S(4)),
+			std::max(0, bottom - top),
+			TRUE);
+	}
 
 	PositionBars();
 
@@ -2797,6 +4555,28 @@ static void PaintChrome(HDC dc, const RECT& rc)
 	FillRectColor(dc, g.rOpen, ACCENT);
 	DrawTextColor(dc, L"Open Folder…", g.rOpen, g.fUi, RGB(255, 255, 255),
 				  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+	// ✎ Edit / ✓ Done toggle, plus Save while editing
+	g.rEdit = {g.rOpen.right + S(8), S(6), g.rOpen.right + S(84), S(32)};
+
+	FillRectColor(dc, g.rEdit, BG_ACTIVE);
+	DrawTextColor(dc, ed.active ? L"✓ Done" : L"✎ Edit", g.rEdit, g.fUi,
+				  g.hasFile ? FG : FG_DIM, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+	if (ed.active)
+	{
+		g.rSave = {g.rEdit.right + S(4), S(6), g.rEdit.right + S(72), S(32)};
+
+		FillRectColor(dc, g.rSave, BG_ACTIVE);
+		DrawTextColor(dc, L"Save", g.rSave, g.fUi, FG,
+					  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+	}
+	else
+	{
+		g.rSave = {};
+	}
+
+	int folderL = (ed.active ? g.rSave.right : g.rEdit.right) + S(10);
 
 	int x = w - S(12);
 
@@ -2917,7 +4697,7 @@ static void PaintChrome(HDC dc, const RECT& rc)
 		DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
 	// folder label fills the gap
-	RECT rf = {S(136), 0, g.rCheck.left - S(10), S(38)};
+	RECT rf = {folderL, 0, g.rCheck.left - S(10), S(38)};
 
 	DrawTextColor(
 		dc,
@@ -3145,6 +4925,19 @@ static LRESULT CALLBACK MainProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 				nullptr,
 				g.hinst,
 				nullptr);
+			ed.wnd = CreateWindowExW(
+				0,
+				L"CAEditor",
+				L"",
+				WS_CHILD | WS_CLIPSIBLINGS | WS_VSCROLL | WS_HSCROLL | WS_TABSTOP,
+				0,
+				0,
+				0,
+				0,
+				w,
+				nullptr,
+				g.hinst,
+				nullptr);
 			g.findBar = CreateWindowExW(
 				0,
 				L"CABar",
@@ -3252,7 +5045,8 @@ static LRESULT CALLBACK MainProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 					return TRUE;
 				}
 
-				if (PtInRect(&g.rOpen, pt) || PtInRect(&g.rCheck, pt) || PtInRect(&g.rSlider, pt))
+				if (PtInRect(&g.rOpen, pt) || PtInRect(&g.rCheck, pt) || PtInRect(&g.rSlider, pt) ||
+					PtInRect(&g.rEdit, pt) || PtInRect(&g.rSave, pt))
 				{
 					SetCursor(LoadCursorW(nullptr, IDC_HAND));
 
@@ -3284,6 +5078,20 @@ static LRESULT CALLBACK MainProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 			if (PtInRect(&g.rOpen, pt))
 			{
 				PickFolder();
+
+				return 0;
+			}
+
+			if (PtInRect(&g.rEdit, pt))
+			{
+				EdToggle();
+
+				return 0;
+			}
+
+			if (PtInRect(&g.rSave, pt))
+			{
+				EdSave();
 
 				return 0;
 			}
@@ -3429,6 +5237,19 @@ static LRESULT CALLBACK MainProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 					return CDRF_DODEFAULT;
 				}
 
+				if (hdr->code == TVN_SELCHANGINGW && ed.active)
+				{
+					NMTREEVIEWW*	tv	= (NMTREEVIEWW*)lp;
+					TreeData*		d	=
+						tv->itemNew.hItem ? DataOf(tv->itemNew.hItem) : nullptr;
+
+					// returning TRUE keeps the selection (and the editor)
+					if (d && d->kind == 1 && !EdExit())
+						return TRUE;
+
+					return FALSE;
+				}
+
 				if (hdr->code == TVN_SELCHANGEDW)
 				{
 					NMTREEVIEWW*	tv	= (NMTREEVIEWW*)lp;
@@ -3514,6 +5335,7 @@ static LRESULT CALLBACK MainProc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 			return 0;
 
 		case WM_CLOSE:
+			if (!EdExit()) return 0;		// user cancelled the close
 
 			SaveSettings();
 
@@ -3559,6 +5381,20 @@ static bool PreTranslate(MSG& m)
 	bool ctrl = GetKeyState(VK_CONTROL) < 0;
 	bool shift = GetKeyState(VK_SHIFT) < 0;
 	HWND focus = GetFocus();
+
+	if (ctrl && m.wParam == 'S')
+	{
+		if (ed.active) EdSave();
+
+		return true;
+	}
+
+	// the editor handles its own clipboard / undo / select-all keys
+	if (ctrl && focus == ed.wnd && ed.active &&
+		wcschr(L"ACVXYZ", (wchar_t)m.wParam))
+	{
+		return false;
+	}
 
 	switch (m.wParam)
 	{
@@ -3705,6 +5541,16 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int show)
 	wc.lpszClassName	= L"CACode";
 
 	RegisterClassW(&wc);
+
+	wc.lpfnWndProc		= EditorProc;
+	wc.lpszClassName	= L"CAEditor";
+	wc.hCursor			= LoadCursorW(nullptr, IDC_IBEAM);
+	wc.style			= CS_DBLCLKS;
+
+	RegisterClassW(&wc);
+
+	wc.hCursor			= LoadCursorW(nullptr, IDC_ARROW);
+	wc.style			= 0;
 
 	wc.lpfnWndProc		= BarProc;
 	wc.lpszClassName	= L"CABar";
