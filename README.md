@@ -171,3 +171,7 @@ core (build with `make` inside `macos/`; see `macos/README.md`).
 LLM (e.g. Claude Code) the storage layout, JSON schema, color convention, and
 line-numbering rules — ask it to "annotate this codebase" and view the result
 in the app.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
