@@ -153,13 +153,16 @@ handling. `test_viewer.py`, `test_note_wrap.py`, and `test_annotation_nav.py`
 open this project's own folder and annotations, so they double as a check
 that `.annotations/code_annotator.py.ann.json` is in sync with the source.
 
-## C++ port
+## C++ ports
 
 `cpp/` contains a native Win32 port of the viewer/annotator with the same
 on-disk format (byte-identical sidecars, same `--check`/`--fix` CLI), so it
 can be used interchangeably with the Python app on the same project. Build
 with `cpp\build.bat` (MSVC). See `cpp/README.md` for details and the
 feature-parity notes.
+
+`macos/` contains a native Cocoa port sharing the same platform-independent
+core (build with `make` inside `macos/`; see `macos/README.md`).
 
 ## Annotating with an LLM
 
