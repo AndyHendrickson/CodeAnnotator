@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# Copyright (c) 2026 Andy Hendrickson
+# SPDX-License-Identifier: MIT
 """Verify note wrapping: CR handling, code avoidance, re-wrap on resize/scroll."""
 import json, os, sys, tempfile
 import os

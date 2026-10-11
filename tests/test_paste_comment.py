@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# Copyright (c) 2026 Andy Hendrickson
+# SPDX-License-Identifier: MIT
 """Verify paste-as-comment inserts into the EDITOR (undoable, save-gated)."""
 import json, os, shutil, sys, tempfile
 import os

@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# Copyright (c) 2026 Andy Hendrickson
+# SPDX-License-Identifier: MIT
 """Anchor-based self-healing when files change outside the app."""
 import json
 import os

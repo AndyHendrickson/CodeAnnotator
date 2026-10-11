@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Andy Hendrickson
+// SPDX-License-Identifier: MIT
+//
 // core.cpp — see core.hpp. Port of the non-GUI half of code_annotator.py.
 // Platform-independent: shared by the Win32 GUI (../cpp/gui.cpp) and the
 // macOS GUI (../macos/main.mm).

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Andy Hendrickson
+// SPDX-License-Identifier: MIT
+//
 // highlight.cpp — see highlight.hpp. Tables are copied verbatim from the
 // Python original; each entry is a whitespace-separated word list.
 #include "highlight.hpp"

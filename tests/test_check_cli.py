@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# Copyright (c) 2026 Andy Hendrickson
+# SPDX-License-Identifier: MIT
 """The --check / --fix command-line mode."""
 import json
 import os

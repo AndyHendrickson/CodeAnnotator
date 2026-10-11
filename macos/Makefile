@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Andy Hendrickson
+# SPDX-License-Identifier: MIT
+#
 # Build the Code Annotator macOS port. Requires Xcode command line tools
 # (xcode-select --install). Produces both a plain binary (also the --check
 # CLI) and a double-clickable CodeAnnotator.app bundle.

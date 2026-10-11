@@ -1,4 +1,6 @@
 @echo off
+rem Copyright (c) 2026 Andy Hendrickson
+rem SPDX-License-Identifier: MIT
 rem Build the Code Annotator C++ port with the Visual Studio 18 toolchain.
 setlocal
 call "E:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" >nul

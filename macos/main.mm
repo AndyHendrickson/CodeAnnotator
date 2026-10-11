@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Andy Hendrickson
+// SPDX-License-Identifier: MIT
+//
 // main.mm — Code Annotator macOS port: Cocoa GUI and entry point.
 //
 // Reuses the platform-independent core from ../cpp (annotations, anchors,

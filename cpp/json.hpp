@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Andy Hendrickson
+// SPDX-License-Identifier: MIT
+//
 // json.hpp — minimal JSON parser/serializer for the Code Annotator C++ port.
 //
 // The serializer reproduces Python's json.dump(data, indent=2) output

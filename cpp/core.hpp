@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Andy Hendrickson
+// SPDX-License-Identifier: MIT
+//
 // core.hpp — non-GUI logic of the Code Annotator C++ port: annotation
 // sidecar files, whitespace-insensitive anchors, the parallel annotation
 // tree, and the --check/--fix CLI. Mirrors code_annotator.py.

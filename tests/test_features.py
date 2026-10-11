@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# Copyright (c) 2026 Andy Hendrickson
+# SPDX-License-Identifier: MIT
 """Outline panel, color filter, delete undo, settings, portable wheel,
 in-editor find, live sidecar reload, and the save-conflict guard."""
 import json

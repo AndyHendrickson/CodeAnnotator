@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# Copyright (c) 2026 Andy Hendrickson
+# SPDX-License-Identifier: MIT
 """Verify Alt+Up/Alt+Down annotation navigation."""
 import sys
 import os

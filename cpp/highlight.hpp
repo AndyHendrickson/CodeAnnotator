@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Andy Hendrickson
+// SPDX-License-Identifier: MIT
+//
 // highlight.hpp — line-oriented syntax tokenizer of the Code Annotator
 // C++ port. Mirrors the scanner and language tables in code_annotator.py.
 #pragma once

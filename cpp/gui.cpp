@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Andy Hendrickson
+// SPDX-License-Identifier: MIT
+//
 // gui.cpp — Code Annotator C++ port: Win32 GUI and entry point.
 //
 // Browse a project folder, view code files with syntax colorization, and

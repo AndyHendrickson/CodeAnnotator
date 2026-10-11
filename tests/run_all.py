@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# Copyright (c) 2026 Andy Hendrickson
+# SPDX-License-Identifier: MIT
 """Run every test_*.py in this folder, each in its own interpreter.
 
 The GUI tests drive the real app in Tk windows positioned off-screen, so a

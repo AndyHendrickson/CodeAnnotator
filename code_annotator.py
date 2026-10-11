@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Andy Hendrickson
+# SPDX-License-Identifier: MIT
 """Code Annotator — browse a project folder, view code files with syntax
 colorization, and overlay translucent annotations kept in a parallel tree.
 
