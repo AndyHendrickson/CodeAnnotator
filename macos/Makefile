@@ -7,7 +7,7 @@ BIN      := build/code_annotator
 CORE     := ../cpp/core.cpp ../cpp/highlight.cpp
 HEADERS  := ../cpp/core.hpp ../cpp/highlight.hpp ../cpp/json.hpp
 CXXFLAGS := -std=c++17 -O2 -Wall -I../cpp
-MINVER   := -mmacosx-version-min=10.14
+MINVER   := -mmacosx-version-min=10.15
 
 all: $(BIN) app
 

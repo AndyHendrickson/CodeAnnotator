@@ -100,7 +100,8 @@ static const char* SKIP_DIRS[] =
 
 struct Match { int ln, col, len; };
 
-@class CodeView;
+@interface CodeView : NSView
+@end
 @class TreeNode;
 @class AppDelegate;
 
@@ -1384,9 +1385,6 @@ static void EditAnnotation(Annotation ann, bool isNew, int existingIdx)
 }
 
 // ---------------------------------------------------------------- code view
-
-@interface CodeView : NSView
-@end
 
 @implementation CodeView
 
