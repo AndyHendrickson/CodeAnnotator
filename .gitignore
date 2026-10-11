@@ -4,3 +4,4 @@ __pycache__/
 cpp/build/
 macos/build/
 AI*/
+.claude/settings.local.json
